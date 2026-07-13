@@ -79,7 +79,9 @@ public final class LauncherActivity extends Activity {
     private GenerativeSlideshow slideshow;
     private TextView loadingTitle;
     private TextView loadingMessage;
-    private int messageIndex;
+    private TextView loadingStatus;
+    private final Random loadingMessageRandom = new Random();
+    private int lastLoadingMessageIndex = -1;
     private ControllerInfo pendingController;
     private BluetoothAction pendingBluetoothAction;
     private final String[] loadingMessages = {
@@ -90,6 +92,19 @@ public final class LauncherActivity extends Activity {
             "Aligning virtual displays…",
             "Preparing controller uplink…",
             "Calibrating couch coordinates…",
+            "Julification in progress…",
+            "Pampering guinea pigs…",
+            "Did you know the scientific name for a guinea pig is Cavia porcellus?",
+            "Polishing pixels…",
+            "Feeding the hamsters in the server room…",
+            "Convincing the GPU to cooperate…",
+            "Rolling for initiative…",
+            "Untangling imaginary network cables…",
+            "Teaching photons to take the shortest route…",
+            "Asking packets to form an orderly queue…",
+            "Warming up tiny digital dragons…",
+            "Checking the couch-to-screen alignment…",
+            "Applying ceremonial RGB lighting…",
             "Almost ready…"
     };
 
@@ -206,6 +221,11 @@ public final class LauncherActivity extends Activity {
         LinearLayout.LayoutParams msgParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         msgParams.topMargin = dp(18);
         loadingCopy.addView(loadingMessage, msgParams);
+        loadingStatus = text("", 14, 0xFFB8C0D9, false);
+        loadingStatus.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusParams.topMargin = dp(14);
+        loadingCopy.addView(loadingStatus, statusParams);
         TextView cancelHint = text("Press BACK to cancel", 14, 0xBFFFFFFF, false);
         cancelHint.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -509,7 +529,8 @@ public final class LauncherActivity extends Activity {
         homeLayer.setVisibility(View.GONE);
         loadingLayer.setVisibility(View.VISIBLE);
         loadingTitle.setText(host.name);
-        messageIndex = new Random().nextInt(loadingMessages.length);
+        setLoadingStatus("Preparing wake sequence...");
+        lastLoadingMessageIndex = -1;
         rotateLoadingMessage();
         slideshow.start();
         executor.execute(() -> wakeAndWait(host));
@@ -518,7 +539,12 @@ public final class LauncherActivity extends Activity {
     private void rotateLoadingMessage() {
         if (loadingLayer.getVisibility() != View.VISIBLE) return;
         loadingMessage.animate().alpha(0f).setDuration(180).withEndAction(() -> {
-            loadingMessage.setText(loadingMessages[messageIndex++ % loadingMessages.length]);
+            int nextIndex;
+            do {
+                nextIndex = loadingMessageRandom.nextInt(loadingMessages.length);
+            } while (loadingMessages.length > 1 && nextIndex == lastLoadingMessageIndex);
+            lastLoadingMessageIndex = nextIndex;
+            loadingMessage.setText(loadingMessages[nextIndex]);
             loadingMessage.animate().alpha(1f).setDuration(260).start();
         }).start();
         mainHandler.postDelayed(this::rotateLoadingMessage, 2100);
@@ -527,14 +553,20 @@ public final class LauncherActivity extends Activity {
     private void wakeAndWait(Host host) {
         long deadline = System.currentTimeMillis() + HOST_TIMEOUT_MS;
         long nextWake = 0;
+        setLoadingStatus("Checking " + host.address + " for a running streaming host...");
         while (!launchCancelled.get() && System.currentTimeMillis() < deadline) {
-            if (isHostReady(host)) {
-                mainHandler.post(() -> openMoonlight(host));
+            int readyPort = findReadyPort(host);
+            if (readyPort > 0) {
+                setLoadingStatus("Host responded on port " + readyPort + ". Starting Moonlight...");
+                mainHandler.postDelayed(() -> openMoonlight(host), 350);
                 return;
             }
             if (System.currentTimeMillis() >= nextWake) {
+                setLoadingStatus("Sending Wake-on-LAN packet...");
                 sendWakeOnLan(host.macAddress);
                 nextWake = System.currentTimeMillis() + 5000;
+            } else {
+                setLoadingStatus("Waiting for Vibepollo or Sunshine at " + host.address + "...");
             }
             try { Thread.sleep(1200); } catch (InterruptedException ignored) { return; }
         }
@@ -542,24 +574,37 @@ public final class LauncherActivity extends Activity {
             mainHandler.post(() -> {
                 loadingMessage.setText("The host did not become ready. Press BACK and try again.");
                 loadingMessage.setTextColor(0xFFFF8A80);
+                loadingStatus.setText("No compatible host service responded within 90 seconds.");
+                loadingStatus.setTextColor(0xFFFFB4AB);
             });
         }
     }
 
-    private boolean isHostReady(Host host) {
-        if (host.address == null || host.address.isEmpty()) return false;
+    private int findReadyPort(Host host) {
+        if (host.address == null || host.address.isEmpty()) return -1;
         int[] ports = {host.port > 0 ? host.port : 47989, 47984, 47989};
         for (int port : ports) {
             try (Socket socket = new Socket()) {
                 socket.connect(new InetSocketAddress(host.address, port), 650);
-                return true;
+                return port;
             } catch (IOException ignored) {}
         }
-        return false;
+        return -1;
+    }
+
+    private void setLoadingStatus(String status) {
+        Runnable update = () -> {
+            if (loadingStatus == null || loadingLayer.getVisibility() != View.VISIBLE) return;
+            loadingStatus.setTextColor(0xFFB8C0D9);
+            loadingStatus.setText(status);
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) update.run();
+        else mainHandler.post(update);
     }
 
     private void openMoonlight(Host host) {
         if (launchCancelled.get()) return;
+        setLoadingStatus("Opening Moonlight for " + host.name + "...");
         slideshow.stop();
         Intent intent = new Intent(ACTION_STREAM);
         intent.setPackage(host.moonlightPackage);
@@ -571,6 +616,8 @@ public final class LauncherActivity extends Activity {
         } catch (Exception error) {
             loadingMessage.setText("Compatible Moonlight X is not installed or does not accept the public launch intent.");
             loadingMessage.setTextColor(0xFFFF8A80);
+            loadingStatus.setText("The public Moonlight launch intent was rejected.");
+            loadingStatus.setTextColor(0xFFFFB4AB);
         }
     }
 
@@ -640,6 +687,8 @@ public final class LauncherActivity extends Activity {
         mainHandler.removeCallbacksAndMessages(null);
         slideshow.stop();
         loadingMessage.setTextColor(0xFFE5E8F5);
+        loadingStatus.setTextColor(0xFFB8C0D9);
+        loadingStatus.setText("");
         loadingLayer.setVisibility(View.GONE);
         homeLayer.setVisibility(View.VISIBLE);
     }
