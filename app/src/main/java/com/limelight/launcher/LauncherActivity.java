@@ -18,15 +18,18 @@ import android.graphics.PixelFormat;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.BatteryState;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -61,6 +64,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class LauncherActivity extends Activity {
     private static final String TAG = "WakeAndPlay";
@@ -71,11 +75,15 @@ public final class LauncherActivity extends Activity {
     };
     private static final String ACTION_STREAM = "com.limelight.action.STREAM";
     private static final String ACTION_RETURN_STREAM = "com.limelight.action.RETURN_STREAM";
+    private static final String ACTION_DISCONNECT_STREAM = "com.limelight.action.DISCONNECT_STREAM";
+    private static final String ACTION_QUIT_STREAM_APP = "com.limelight.action.QUIT_STREAM_APP";
     private static final String ACTION_OPEN_SETTINGS = "com.limelight.action.OPEN_SETTINGS";
     private static final String EXTRA_HOST_UUID = "com.limelight.extra.HOST_UUID";
     private static final String EXTRA_APP_ID = "com.limelight.extra.APP_ID";
     private static final String EXTRA_APP_NAME = "com.limelight.extra.APP_NAME";
     private static final String EXTRA_EXTERNAL_FRONTEND = "com.limelight.extra.EXTERNAL_FRONTEND";
+    private static final String EXTRA_EXTERNAL_FRONTEND_PACKAGE = "com.limelight.extra.EXTERNAL_FRONTEND_PACKAGE";
+    private static final String EXTRA_EXTERNAL_FRONTEND_MESSAGE = "com.limelight.extra.EXTERNAL_FRONTEND_MESSAGE";
     private static final long HOST_TIMEOUT_MS = 90_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
     private static final String HISTORY_PREFS = "launch_history";
@@ -88,10 +96,13 @@ public final class LauncherActivity extends Activity {
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final AtomicBoolean launchCancelled = new AtomicBoolean(false);
     private final AtomicBoolean hostProbeRunning = new AtomicBoolean(false);
+    private final AtomicInteger backdropRequest = new AtomicInteger();
     private final Map<String, TextView> hostStatusViews = new HashMap<>();
     private List<Host> visibleHosts = Collections.emptyList();
     private StreamStatus currentStreamStatus;
     private long lastHostProbeAt;
+    private boolean initialFocusPending;
+    private boolean sessionStatusLoaded;
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
     private LinearLayout appRow;
@@ -100,6 +111,12 @@ public final class LauncherActivity extends Activity {
     private TextView appEmptyState;
     private TextView sessionState;
     private TextView resumeButton;
+    private TextView sessionButton;
+    private ImageView artworkBackdrop;
+    private ImageView artworkHero;
+    private View artworkScrim;
+    private Bitmap currentBackdropBitmap;
+    private Bitmap currentHeroBitmap;
     private FrameLayout homeLayer;
     private FrameLayout loadingLayer;
     private GenerativeSlideshow slideshow;
@@ -112,6 +129,7 @@ public final class LauncherActivity extends Activity {
     private BluetoothAction pendingBluetoothAction;
     private Host selectedHost;
     private View selectedHostCard;
+    private View lastFocusedAppCard;
     private Host lastLaunchHost;
     private StreamApp lastLaunchApp;
     private final String[] loadingMessages = {
@@ -141,9 +159,8 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        // LauncherTheme is translucent so the stream Surface remains alive, but
-        // this UI draws every pixel. An opaque buffer avoids partial-redraw
-        // artifacts on Android TV compositors while preserving that lifecycle.
+        // Force an opaque buffer to avoid partial-redraw artifacts on Android TV
+        // compositors when this window replaces the Moonlight stream Surface.
         getWindow().setFormat(PixelFormat.OPAQUE);
         setContentView(buildUi());
         hideSystemUi();
@@ -154,8 +171,11 @@ public final class LauncherActivity extends Activity {
         super.onResume();
         launchCancelled.set(false);
         if (homeLayer != null) {
+            initialFocusPending = true;
+            sessionStatusLoaded = false;
             showHome();
             refreshDashboard();
+            mainHandler.postDelayed(this::finishInitialFocus, 650);
         }
     }
 
@@ -164,11 +184,27 @@ public final class LauncherActivity extends Activity {
         super.onPause();
         mainHandler.removeCallbacksAndMessages(null);
         if (slideshow != null) slideshow.stop();
+        if (homeLayer != null && homeLayer.getVisibility() == View.VISIBLE) {
+            // Force a complete redraw when Android TV brings this task back.
+            // Some TV compositors otherwise reuse a partially damaged buffer.
+            homeLayer.setVisibility(View.INVISIBLE);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && homeLayer != null && homeLayer.getVisibility() == View.VISIBLE) {
+            mainHandler.postDelayed(this::focusResumeActionIfPending, 120);
+        }
     }
 
     @Override
     protected void onDestroy() {
         executor.shutdownNow();
+        if (artworkBackdrop != null) artworkBackdrop.setImageDrawable(null);
+        if (artworkHero != null) artworkHero.setImageDrawable(null);
+        recycleCurrentArtwork();
         super.onDestroy();
     }
 
@@ -182,12 +218,52 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN && isNavigationKey(event.getKeyCode())) {
+            // If the user starts navigating before the asynchronous dashboard data
+            // arrives, their choice wins over the delayed default Resume focus.
+            initialFocusPending = false;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private static boolean isNavigationKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+                keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_A || keyCode == KeyEvent.KEYCODE_BUTTON_B;
+    }
+
     private View buildUi() {
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(5, 6, 10));
 
         homeLayer = new FrameLayout(this);
+        homeLayer.setBackgroundColor(Color.rgb(5, 6, 10));
         homeLayer.addView(new GenerativeBackdrop(this), match());
+
+        artworkBackdrop = new ImageView(this);
+        artworkBackdrop.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        artworkBackdrop.setAlpha(0f);
+        homeLayer.addView(artworkBackdrop, match());
+
+        artworkHero = new ImageView(this);
+        artworkHero.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        artworkHero.setPadding(dp(34), dp(66), dp(34), dp(66));
+        artworkHero.setAlpha(0f);
+        FrameLayout.LayoutParams heroParams = new FrameLayout.LayoutParams(
+                dp(520), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END | Gravity.CENTER_VERTICAL);
+        heroParams.rightMargin = dp(18);
+        homeLayer.addView(artworkHero, heroParams);
+
+        artworkScrim = new View(this);
+        artworkScrim.setBackground(new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xF405060A, 0xC405060A, 0x7005060A}));
+        artworkScrim.setAlpha(0f);
+        homeLayer.addView(artworkScrim, match());
+
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(64), dp(26), dp(64), dp(24));
@@ -214,10 +290,11 @@ public final class LauncherActivity extends Activity {
         quickActionsParams.topMargin = dp(6);
         content.addView(quickActions, quickActionsParams);
 
-        resumeButton = text("", 13, 0xFFE8DDFF, true);
+        resumeButton = text("", 16, 0xFFF1EAFF, true);
         resumeButton.setFocusable(true);
         resumeButton.setClickable(true);
-        resumeButton.setPadding(dp(12), dp(5), dp(12), dp(5));
+        resumeButton.setMinHeight(dp(46));
+        resumeButton.setPadding(dp(20), dp(8), dp(20), dp(8));
         resumeButton.setVisibility(View.GONE);
         resumeButton.setOnClickListener(v -> {
             if (isActiveStream(currentStreamStatus)) {
@@ -226,9 +303,22 @@ public final class LauncherActivity extends Activity {
                 beginAppLaunch(lastLaunchHost, lastLaunchApp);
             }
         });
-        resumeButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(resumeButton, focused));
-        styleCompactButton(resumeButton, false);
+        resumeButton.setOnFocusChangeListener((v, focused) -> stylePrimaryButton(resumeButton, focused));
+        stylePrimaryButton(resumeButton, false);
         quickActions.addView(resumeButton, wrap());
+
+        sessionButton = text("SESSION", 15, 0xFFE8DDFF, true);
+        sessionButton.setFocusable(true);
+        sessionButton.setClickable(true);
+        sessionButton.setMinHeight(dp(46));
+        sessionButton.setPadding(dp(18), dp(8), dp(18), dp(8));
+        sessionButton.setVisibility(View.GONE);
+        sessionButton.setOnClickListener(v -> showSessionPanel());
+        sessionButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(sessionButton, focused));
+        styleCompactButton(sessionButton, false);
+        LinearLayout.LayoutParams sessionButtonParams = wrap();
+        sessionButtonParams.leftMargin = dp(10);
+        quickActions.addView(sessionButton, sessionButtonParams);
 
         TextView settingsButton = text("⚙  OPTIONS", 13, 0xFFD2C4FF, true);
         settingsButton.setFocusable(true);
@@ -237,9 +327,12 @@ public final class LauncherActivity extends Activity {
         settingsButton.setOnClickListener(v -> openMoonlightSettings());
         settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
         styleCompactButton(settingsButton, false);
-        LinearLayout.LayoutParams settingsParams = wrap();
-        settingsParams.leftMargin = dp(10);
-        quickActions.addView(settingsButton, settingsParams);
+        FrameLayout.LayoutParams settingsParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
+        settingsParams.topMargin = dp(30);
+        settingsParams.rightMargin = dp(64);
+        homeLayer.addView(settingsButton, settingsParams);
 
         TextView controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
@@ -259,7 +352,7 @@ public final class LauncherActivity extends Activity {
         HorizontalScrollView hostScroll = horizontalScroll();
         hostRow = horizontalRow();
         hostScroll.addView(hostRow);
-        LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(118));
+        LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96));
         hostParams.topMargin = dp(6);
         content.addView(hostScroll, hostParams);
 
@@ -354,6 +447,10 @@ public final class LauncherActivity extends Activity {
                     status.app = value(cursor, "app");
                     status.computer = value(cursor, "computer");
                     status.bitrateKbps = integer(cursor, "bitrate_kbps", 0);
+                    status.width = integer(cursor, "width", 0);
+                    status.height = integer(cursor, "height", 0);
+                    status.fps = integer(cursor, "fps", 0);
+                    status.hdr = integer(cursor, "hdr", 0) != 0;
                     status.activityAlive = integer(cursor, "activity_alive", 0) != 0;
                     status.startedAt = longValue(cursor, "started_at", 0L);
                     status.updatedAt = longValue(cursor, "updated_at", 0L);
@@ -368,6 +465,7 @@ public final class LauncherActivity extends Activity {
     }
 
     private void renderStreamStatus(StreamStatus status) {
+        sessionStatusLoaded = true;
         currentStreamStatus = status;
         updateResumeAction();
         updateSessionHostStatus();
@@ -608,15 +706,14 @@ public final class LauncherActivity extends Activity {
             if (selectedHost != null && host.uuid.equals(selectedHost.uuid)) {
                 selectedHostCard = card;
                 selectedHost = host;
-                styleCard(card, true);
+                styleHostCard(card, false, true);
             }
         }
         if (!hosts.isEmpty()) {
             if (selectedHostCard == null) {
                 selectedHostCard = hostRow.getChildAt(0);
-                styleCard(selectedHostCard, true);
+                styleHostCard(selectedHostCard, false, true);
                 selectHost(hosts.get(0), false);
-                selectedHostCard.requestFocus();
             }
         } else {
             selectedHost = null;
@@ -627,33 +724,38 @@ public final class LauncherActivity extends Activity {
     }
 
     private View hostCard(Host host) {
-        LinearLayout card = cardBase(dp(270), dp(105));
+        LinearLayout card = cardBase(dp(250), dp(82));
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        TextView icon = text("▣", 24, 0xFFB99CFF, true);
+        card.setPadding(dp(16), dp(7), dp(16), dp(7));
+        styleHostCard(card, false, false);
+        TextView icon = text("▣", 16, 0xFF9E8ACB, true);
         card.addView(icon, wrap());
-        TextView name = text(host.name, 18, Color.WHITE, true);
+        TextView name = text(host.name, 16, Color.WHITE, true);
         name.setSingleLine(true);
-        LinearLayout.LayoutParams nameParams = wrap(); nameParams.topMargin = dp(3);
+        LinearLayout.LayoutParams nameParams = wrap(); nameParams.topMargin = dp(1);
         card.addView(name, nameParams);
-        TextView address = text("CHECKING · " + (host.address != null ? host.address : "Address unavailable"), 11, 0xFFABB3CA, false);
+        TextView address = text("CHECKING · " + (host.address != null ? host.address : "Address unavailable"), 10, 0xFFABB3CA, false);
         address.setSingleLine(true);
-        LinearLayout.LayoutParams addrParams = wrap(); addrParams.topMargin = dp(2);
+        LinearLayout.LayoutParams addrParams = wrap(); addrParams.topMargin = dp(1);
         card.addView(address, addrParams);
         hostStatusViews.put(host.uuid, address);
         card.setOnClickListener(v -> {
-            if (selectedHostCard != null && selectedHostCard != card) styleCard(selectedHostCard, false);
+            if (selectedHostCard != null && selectedHostCard != card) {
+                styleHostCard(selectedHostCard, selectedHostCard.hasFocus(), false);
+            }
             selectedHostCard = card;
-            styleCard(card, true);
+            styleHostCard(card, card.hasFocus(), true);
             selectHost(host, true);
         });
         card.setOnFocusChangeListener((v, focused) ->
-                styleCard(card, focused || card == selectedHostCard));
+                styleHostCard(card, focused, card == selectedHostCard));
         return card;
     }
 
     private void selectHost(Host host, boolean moveFocusToApps) {
         selectedHost = host;
+        clearArtworkBackdrop();
         appsLabel.setText("APPS · " + host.name.toUpperCase(Locale.ROOT));
         appRow.removeAllViews();
         TextView loading = text("Loading cached applications…", 16, 0xFFBDC4D8, false);
@@ -670,13 +772,16 @@ public final class LauncherActivity extends Activity {
 
     private void renderApps(Host host, List<StreamApp> apps) {
         appRow.removeAllViews();
+        lastFocusedAppCard = null;
         if (host == null) {
+            clearArtworkBackdrop();
             appsLabel.setText("APPS");
             appRow.addView(text("Choose a streaming host to see its applications.", 16, 0xFFBDC4D8, false),
                     new LinearLayout.LayoutParams(dp(560), ViewGroup.LayoutParams.MATCH_PARENT));
             return;
         }
         if (apps.isEmpty()) {
+            clearArtworkBackdrop();
             appRow.addView(text("No cached applications found. Refresh this host once in Moonlight X.", 16, 0xFFFFB74D, false),
                     new LinearLayout.LayoutParams(dp(720), ViewGroup.LayoutParams.MATCH_PARENT));
             return;
@@ -718,30 +823,173 @@ public final class LauncherActivity extends Activity {
         copyParams.leftMargin = dp(14);
         card.addView(copy, copyParams);
         card.setOnClickListener(v -> beginAppLaunch(host, app));
-        card.setOnFocusChangeListener((v, focused) -> styleCard(card, focused));
+        card.setOnFocusChangeListener((v, focused) -> {
+            styleCard(card, focused);
+            if (focused) {
+                if (lastFocusedAppCard != null && lastFocusedAppCard != card) playTileFocusSound();
+                lastFocusedAppCard = card;
+                showArtworkBackdrop(app.posterUri);
+            }
+        });
         return card;
+    }
+
+    private void playTileFocusSound() {
+        AudioManager audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audioManager != null) {
+            audioManager.playSoundEffect(AudioManager.FX_FOCUS_NAVIGATION_RIGHT, 0.45f);
+        }
     }
 
     private void loadPosterAsync(Uri uri, ImageView target) {
         if (uri == null) return;
         executor.execute(() -> {
             try {
-                BitmapFactory.Options bounds = new BitmapFactory.Options();
-                bounds.inJustDecodeBounds = true;
-                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
-                    BitmapFactory.decodeStream(input, null, bounds);
-                }
-                int sample = 1;
-                while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2;
-                BitmapFactory.Options options = new BitmapFactory.Options();
-                options.inSampleSize = Math.max(1, sample);
-                Bitmap bitmap;
-                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
-                    bitmap = BitmapFactory.decodeStream(input, null, options);
-                }
+                Bitmap bitmap = decodePoster(uri, 512);
                 if (bitmap != null) mainHandler.post(() -> target.setImageBitmap(bitmap));
             } catch (Exception ignored) { }
         });
+    }
+
+    private Bitmap decodePoster(Uri uri, int maxDimension) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+            BitmapFactory.decodeStream(input, null, bounds);
+        }
+        int sample = 1;
+        while (bounds.outWidth / sample > maxDimension || bounds.outHeight / sample > maxDimension) sample *= 2;
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = Math.max(1, sample);
+        try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+            return BitmapFactory.decodeStream(input, null, options);
+        }
+    }
+
+    private void showArtworkBackdrop(Uri uri) {
+        if (uri == null || artworkBackdrop == null) {
+            clearArtworkBackdrop();
+            return;
+        }
+        int request = backdropRequest.incrementAndGet();
+        // Wait until focus settles. Rapid D-pad navigation should not flash a
+        // different full-screen background for every tile crossed.
+        mainHandler.postDelayed(() -> {
+            if (request != backdropRequest.get() || isFinishing() || isDestroyed()) return;
+            executor.execute(() -> loadArtworkBackdrop(request, uri));
+        }, 280);
+    }
+
+    private void loadArtworkBackdrop(int request, Uri uri) {
+        ArtworkBackdropResult result = null;
+        Bitmap hero = null;
+        try {
+            hero = decodePoster(uri, 900);
+            if (hero != null) result = new ArtworkBackdropResult(blurForBackdrop(hero), hero);
+        } catch (Exception error) {
+            if (hero != null && !hero.isRecycled()) hero.recycle();
+            Log.w(TAG, "Unable to load artwork backdrop", error);
+        }
+        ArtworkBackdropResult loaded = result;
+        mainHandler.post(() -> applyArtworkBackdrop(request, loaded));
+    }
+
+    private void applyArtworkBackdrop(int request, ArtworkBackdropResult result) {
+        if (request != backdropRequest.get() || isFinishing() || isDestroyed()) {
+            if (result != null) result.recycle();
+            return;
+        }
+        if (result == null) {
+            clearArtworkBackdrop();
+            return;
+        }
+
+        artworkBackdrop.animate().cancel();
+        artworkHero.animate().cancel();
+        artworkScrim.animate().cancel();
+        // Keep the previous artwork visible until the next one is ready, then
+        // use a slow dip instead of a hard full-screen replacement.
+        artworkBackdrop.animate().alpha(0.06f).setDuration(200).start();
+        artworkHero.animate().alpha(0f).setDuration(200).withEndAction(() -> {
+            if (request != backdropRequest.get() || isFinishing() || isDestroyed()) {
+                result.recycle();
+                return;
+            }
+            Bitmap oldBackdrop = currentBackdropBitmap;
+            Bitmap oldHero = currentHeroBitmap;
+            currentBackdropBitmap = result.backdrop;
+            currentHeroBitmap = result.hero;
+            artworkBackdrop.setImageBitmap(currentBackdropBitmap);
+            artworkHero.setImageBitmap(currentHeroBitmap);
+            if (oldBackdrop != null && !oldBackdrop.isRecycled()) oldBackdrop.recycle();
+            if (oldHero != null && !oldHero.isRecycled()) oldHero.recycle();
+
+            artworkBackdrop.setAlpha(0.06f);
+            artworkHero.setAlpha(0f);
+            artworkBackdrop.animate().alpha(0.28f).setDuration(520).start();
+            artworkHero.animate().alpha(0.58f).setDuration(520).start();
+            artworkScrim.animate().alpha(1f).setDuration(420).start();
+        }).start();
+    }
+
+    private void clearArtworkBackdrop() {
+        int request = backdropRequest.incrementAndGet();
+        if (artworkBackdrop == null) return;
+        artworkBackdrop.animate().cancel();
+        artworkHero.animate().cancel();
+        artworkScrim.animate().cancel();
+        artworkBackdrop.animate().alpha(0f).setDuration(300).start();
+        artworkScrim.animate().alpha(0f).setDuration(300).start();
+        artworkHero.animate().alpha(0f).setDuration(300).withEndAction(() -> {
+            if (request != backdropRequest.get()) return;
+            artworkBackdrop.setImageDrawable(null);
+            artworkHero.setImageDrawable(null);
+            recycleCurrentArtwork();
+        }).start();
+    }
+
+    private void recycleCurrentArtwork() {
+        if (currentBackdropBitmap != null && !currentBackdropBitmap.isRecycled()) currentBackdropBitmap.recycle();
+        if (currentHeroBitmap != null && !currentHeroBitmap.isRecycled()) currentHeroBitmap.recycle();
+        currentBackdropBitmap = null;
+        currentHeroBitmap = null;
+    }
+
+    private static Bitmap blurForBackdrop(Bitmap source) {
+        int width = 180;
+        int height = Math.max(180, Math.min(320,
+                Math.round(source.getHeight() * (width / (float) Math.max(1, source.getWidth())))));
+        Bitmap small = Bitmap.createScaledBitmap(source, width, height, true);
+        if (small == source) small = source.copy(Bitmap.Config.ARGB_8888, true);
+
+        int[] input = new int[width * height];
+        int[] output = new int[input.length];
+        small.getPixels(input, 0, width, 0, 0, width, height);
+        int radius = 2;
+        for (int pass = 0; pass < 1; pass++) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int alpha = 0, red = 0, green = 0, blue = 0, count = 0;
+                    for (int ky = Math.max(0, y - radius); ky <= Math.min(height - 1, y + radius); ky++) {
+                        int row = ky * width;
+                        for (int kx = Math.max(0, x - radius); kx <= Math.min(width - 1, x + radius); kx++) {
+                            int color = input[row + kx];
+                            alpha += Color.alpha(color);
+                            red += Color.red(color);
+                            green += Color.green(color);
+                            blue += Color.blue(color);
+                            count++;
+                        }
+                    }
+                    output[y * width + x] = Color.argb(alpha / count, red / count, green / count, blue / count);
+                }
+            }
+            int[] swap = input;
+            input = output;
+            output = swap;
+        }
+        small.setPixels(input, 0, width, 0, 0, width, height);
+        return small;
     }
 
     private void beginAppLaunch(Host host, StreamApp app) {
@@ -832,6 +1080,8 @@ public final class LauncherActivity extends Activity {
         intent.putExtra(EXTRA_APP_ID, String.valueOf(app.appId));
         intent.putExtra(EXTRA_APP_NAME, app.name);
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND, true);
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND_PACKAGE, getPackageName());
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND_MESSAGE, loadingMessage.getText().toString());
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
@@ -948,12 +1198,50 @@ public final class LauncherActivity extends Activity {
                     ? " · " + currentStreamStatus.app.toUpperCase(Locale.ROOT) : "";
             resumeButton.setText("▶  RETURN TO STREAM" + app);
             resumeButton.setVisibility(View.VISIBLE);
+            if (sessionButton != null) {
+                String elapsed = currentStreamStatus.startedAt > 0
+                        ? " · " + formatElapsed(System.currentTimeMillis() - currentStreamStatus.startedAt) : "";
+                sessionButton.setText("SESSION" + elapsed);
+                sessionButton.setVisibility(View.VISIBLE);
+            }
         } else if (lastLaunchHost != null && lastLaunchApp != null) {
             resumeButton.setText("▶  RESUME LAST · " + lastLaunchApp.name.toUpperCase(Locale.ROOT));
             resumeButton.setVisibility(View.VISIBLE);
+            if (sessionButton != null) sessionButton.setVisibility(View.GONE);
         } else {
             resumeButton.setVisibility(View.GONE);
+            if (sessionButton != null) sessionButton.setVisibility(View.GONE);
         }
+        focusResumeActionIfPending();
+    }
+
+    private void focusResumeActionIfPending() {
+        if (!initialFocusPending || resumeButton == null || resumeButton.getVisibility() != View.VISIBLE) return;
+        resumeButton.post(() -> {
+            if (!initialFocusPending || resumeButton.getVisibility() != View.VISIBLE || !resumeButton.isShown()) return;
+            if (!getWindow().getDecorView().hasWindowFocus()) return;
+            if (resumeButton.requestFocus()) initialFocusPending = false;
+        });
+    }
+
+    private void finishInitialFocus() {
+        if (!initialFocusPending || isFinishing() || isDestroyed()) return;
+        if (!getWindow().getDecorView().hasWindowFocus()) {
+            mainHandler.postDelayed(this::finishInitialFocus, 150);
+            return;
+        }
+        if (!sessionStatusLoaded) {
+            mainHandler.postDelayed(this::finishInitialFocus, 250);
+            return;
+        }
+        if (resumeButton != null && resumeButton.getVisibility() == View.VISIBLE && resumeButton.isShown()) {
+            if (resumeButton.requestFocus()) initialFocusPending = false;
+            return;
+        }
+        if (selectedHostCard != null && selectedHostCard.isShown()) {
+            selectedHostCard.requestFocus();
+        }
+        initialFocusPending = false;
     }
 
     private static boolean isActiveStream(StreamStatus status) {
@@ -976,6 +1264,114 @@ public final class LauncherActivity extends Activity {
             Log.e(TAG, "Unable to return to active stream", error);
             Toast.makeText(this, "The active stream is no longer available.", Toast.LENGTH_LONG).show();
             refreshSessionStatusAsync();
+        }
+    }
+
+    private void showSessionPanel() {
+        StreamStatus status = currentStreamStatus;
+        if (!isActiveStream(status)) {
+            Toast.makeText(this, "The active stream is no longer available.", Toast.LENGTH_LONG).show();
+            refreshSessionStatusAsync();
+            return;
+        }
+
+        String app = status.app != null && !status.app.isEmpty() ? status.app : "Active stream";
+        StringBuilder details = new StringBuilder();
+        if (status.computer != null && !status.computer.isEmpty()) details.append(status.computer);
+        if (status.width > 0 && status.height > 0) {
+            appendDetail(details, status.width + "×" + status.height + (status.fps > 0 ? " @ " + status.fps + " FPS" : ""));
+        }
+        if (status.bitrateKbps > 0) appendDetail(details, Math.round(status.bitrateKbps / 1000f) + " Mbps");
+        if (status.hdr) appendDetail(details, "HDR");
+        if (status.startedAt > 0) {
+            appendDetail(details, "Playing for " + formatElapsed(System.currentTimeMillis() - status.startedAt));
+        }
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.VERTICAL);
+        actions.setPadding(dp(24), dp(2), dp(24), dp(8));
+
+        TextView detailsView = text(
+                details.length() > 0 ? details.toString() : "Moonlight is streaming to this TV.",
+                16, 0xFFFFFFFF, false);
+        detailsView.setPadding(0, 0, 0, dp(12));
+        actions.addView(detailsView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView returnAction = sessionDialogAction("▶  RETURN TO STREAM");
+        TextView disconnectAction = sessionDialogAction("DISCONNECT THIS TV · KEEP APP RUNNING");
+        TextView quitAction = sessionDialogAction("END APP ON HOST · DISCONNECT");
+        actions.addView(returnAction, sessionDialogActionParams(0));
+        actions.addView(disconnectAction, sessionDialogActionParams(dp(7)));
+        actions.addView(quitAction, sessionDialogActionParams(dp(7)));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("ACTIVE SESSION · " + app)
+                .setView(actions)
+                .setNegativeButton("Cancel", null)
+                .create();
+        returnAction.setOnClickListener(v -> {
+            dialog.dismiss();
+            returnToActiveStream(status.moonlightPackage);
+        });
+        disconnectAction.setOnClickListener(v -> {
+            dialog.dismiss();
+            confirmStreamControl(ACTION_DISCONNECT_STREAM, false);
+        });
+        quitAction.setOnClickListener(v -> {
+            dialog.dismiss();
+            confirmStreamControl(ACTION_QUIT_STREAM_APP, true);
+        });
+        dialog.setOnShowListener(ignored -> returnAction.requestFocus());
+        dialog.show();
+    }
+
+    private TextView sessionDialogAction(String label) {
+        TextView action = text(label, 14, 0xFFE8DDFF, true);
+        action.setFocusable(true);
+        action.setClickable(true);
+        action.setPadding(dp(14), dp(10), dp(14), dp(10));
+        action.setOnFocusChangeListener((v, focused) -> styleCompactButton(action, focused));
+        styleCompactButton(action, false);
+        return action;
+    }
+
+    private LinearLayout.LayoutParams sessionDialogActionParams(int topMargin) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = topMargin;
+        return params;
+    }
+
+    private static void appendDetail(StringBuilder details, String value) {
+        if (details.length() > 0) details.append(" · ");
+        details.append(value);
+    }
+
+    private void confirmStreamControl(String action, boolean quitHostApp) {
+        new AlertDialog.Builder(this)
+                .setTitle(quitHostApp ? "End app on host?" : "Disconnect this TV?")
+                .setMessage(quitHostApp
+                        ? "The running application will be closed on the host and this stream will end."
+                        : "The stream will end, but the application will remain running on the host.")
+                .setPositiveButton(quitHostApp ? "End app" : "Disconnect",
+                        (dialog, which) -> sendStreamControl(action))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void sendStreamControl(String action) {
+        StreamStatus status = currentStreamStatus;
+        if (!isActiveStream(status) || status.moonlightPackage == null) return;
+        Intent intent = new Intent(action);
+        intent.setPackage(status.moonlightPackage);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        try {
+            startActivity(intent);
+            overridePendingTransition(0, 0);
+        } catch (RuntimeException error) {
+            Log.e(TAG, "Unable to control active stream", error);
+            Toast.makeText(this, "Moonlight rejected the session control request.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1157,13 +1553,47 @@ public final class LauncherActivity extends Activity {
     }
 
     private void styleCard(View card, boolean focused) {
-        GradientDrawable background = new GradientDrawable();
+        GradientDrawable background = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                focused
+                        ? new int[]{0xE57862AE, 0xD347386E}
+                        : new int[]{0x22FFFFFF, 0x3A232B3D, 0x66131825});
         background.setCornerRadius(dp(14));
-        background.setColor(focused ? 0xFF56418F : 0xC9181C2B);
-        background.setStroke(dp(focused ? 3 : 1), focused ? 0xFFFFFFFF : 0x387C89B2);
+        background.setStroke(dp(focused ? 3 : 1), focused ? 0xFFFFFFFF : 0x70AAB5D4);
         card.setBackground(background);
+        card.setElevation(dp(focused ? 12 : 5));
+        card.setTranslationZ(dp(focused ? 4 : 0));
         card.setScaleX(focused ? 1.045f : 1f);
         card.setScaleY(focused ? 1.045f : 1f);
+    }
+
+    private void styleHostCard(View card, boolean focused, boolean selected) {
+        GradientDrawable background = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                focused
+                        ? new int[]{0xC0675A88, 0xB0343049}
+                        : selected
+                        ? new int[]{0x20FFFFFF, 0x4420283A, 0x65161B28}
+                        : new int[]{0x14FFFFFF, 0x3A1C2333, 0x5C131825});
+        background.setCornerRadius(dp(12));
+        background.setStroke(
+                dp(focused ? 2 : 1),
+                focused ? 0xFFE6DFFF : selected ? 0x608B94AD : 0x4C7C89B2);
+        card.setBackground(background);
+        card.setElevation(dp(focused ? 8 : selected ? 4 : 2));
+        card.setTranslationZ(dp(focused ? 3 : 0));
+        card.setScaleX(focused ? 1.02f : 1f);
+        card.setScaleY(focused ? 1.02f : 1f);
+    }
+
+    private void stylePrimaryButton(View button, boolean focused) {
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(12));
+        background.setColor(focused ? 0xFF654CA1 : 0xA52A2144);
+        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFFFFFFF : 0x806E5AA4);
+        button.setBackground(background);
+        button.setScaleX(focused ? 1.015f : 1f);
+        button.setScaleY(focused ? 1.015f : 1f);
     }
 
     private void styleCompactButton(View button, boolean focused) {
@@ -1256,9 +1686,28 @@ public final class LauncherActivity extends Activity {
         String computer;
         String moonlightPackage;
         int bitrateKbps;
+        int width;
+        int height;
+        int fps;
+        boolean hdr;
         boolean activityAlive;
         long startedAt;
         long updatedAt;
+    }
+
+    private static final class ArtworkBackdropResult {
+        final Bitmap backdrop;
+        final Bitmap hero;
+
+        ArtworkBackdropResult(Bitmap backdrop, Bitmap hero) {
+            this.backdrop = backdrop;
+            this.hero = hero;
+        }
+
+        void recycle() {
+            if (backdrop != null && !backdrop.isRecycled()) backdrop.recycle();
+            if (hero != null && !hero.isRecycled()) hero.recycle();
+        }
     }
 
     private static class GenerativeBackdrop extends View {
@@ -1275,26 +1724,25 @@ public final class LauncherActivity extends Activity {
 
     private static final class GenerativeSlideshow extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Handler handler = new Handler(Looper.getMainLooper());
-        private final Random random = new Random();
-        private float phase;
-        private int palette;
         private boolean running;
-        private final Runnable next = new Runnable() { @Override public void run() { if (!running) return; palette = random.nextInt(5); phase = random.nextFloat(); invalidate(); handler.postDelayed(this, 4700); } };
+        private long startedAt;
         GenerativeSlideshow(android.content.Context context) { super(context); }
-        void start() { running = true; handler.removeCallbacks(next); next.run(); }
-        void stop() { running = false; handler.removeCallbacks(next); }
+        void start() { running = true; startedAt = SystemClock.uptimeMillis(); invalidate(); }
+        void stop() { running = false; }
         @Override protected void onDraw(Canvas canvas) {
             int w = getWidth(), h = getHeight();
-            int[][] palettes = {{0xFF100C28,0xFF47206C,0xFF087F8C},{0xFF071A2B,0xFF143D59,0xFFF4B41A},{0xFF190B28,0xFF5C164E,0xFFEE4266},{0xFF081C15,0xFF1B4332,0xFF52B788},{0xFF101820,0xFF3A506B,0xFF5BC0BE}};
-            int[] colors = palettes[palette % palettes.length];
-            paint.setShader(new LinearGradient(0, h * phase, w, h * (1f - phase), colors, null, Shader.TileMode.CLAMP));
-            canvas.drawRect(0,0,w,h,paint); paint.setShader(null);
-            Random seeded = new Random(palette * 997L + Float.floatToIntBits(phase));
-            for (int i=0;i<22;i++) { paint.setColor(0x16FFFFFF + (i%3)*0x08000000); float r=h*(.025f+seeded.nextFloat()*.18f); canvas.drawCircle(seeded.nextFloat()*w, seeded.nextFloat()*h, r, paint); }
-            paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(Math.max(2, h*.004f)); paint.setColor(0x45FFFFFF);
-            for(int i=0;i<7;i++){ float y=h*(.18f+i*.105f); canvas.drawLine(-w*.1f,y,w*1.1f,y-w*.12f,paint); }
-            paint.setStyle(Paint.Style.FILL);
+            float phase = (SystemClock.uptimeMillis() - startedAt) / 9000f;
+            paint.setShader(new LinearGradient(0, 0, w, h,
+                    new int[]{0xFF090B14, 0xFF171633, 0xFF311A58}, null, Shader.TileMode.CLAMP));
+            canvas.drawRect(0, 0, w, h, paint);
+            paint.setShader(null);
+            paint.setColor(0x347C4DFF);
+            canvas.drawCircle(w * (.76f + .05f * (float)Math.sin(phase)),
+                    h * (.20f + .05f * (float)Math.cos(phase)), h * .44f, paint);
+            paint.setColor(0x2937B5FF);
+            canvas.drawCircle(w * (.20f + .04f * (float)Math.cos(phase * .8f)),
+                    h * (.84f + .04f * (float)Math.sin(phase * .8f)), h * .52f, paint);
+            if (running) postInvalidateDelayed(32);
         }
     }
 }

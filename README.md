@@ -110,9 +110,25 @@ Moonlight exposes narrowly scoped integration surfaces:
 Wake & Play probes saved hosts asynchronously and labels them as online,
 Wake-on-LAN ready, or offline. While a live Moonlight activity exists, the last
 launch shortcut becomes **Return to Stream** and the matching host card shows
-the active application, client, and elapsed session time. Its fully drawn
-launcher window is system-translucent so Android TV keeps Moonlight's video
-surface alive underneath it until the user returns to the stream.
+the active application, client, and elapsed session time. Moonlight moves video
+decoding to a persistent background surface during the handoff, allowing Wake &
+Play to use a fully opaque window and avoid partial-redraw artifacts on TV
+compositors.
+Moonlight routes HOME and BACK from externally launched streams back to Wake &
+Play, so these keys open the session controls rather than ending the stream.
+
+The active-session panel shows the current stream format and provides confirmed
+actions to return, disconnect while leaving the host app running, or end the
+host app. Destructive controls use Moonlight's signature-protected
+`CONTROL_STREAM` permission. Focusing an application tile also blends its
+poster into a lightly softened color wash plus a proportion-preserving hero
+image. Focus changes are debounced and cross-faded for a calmer console-style
+background without blocking the UI. Application, host, and controller tiles use
+a subtle translucent glass treatment, while Options stays in the upper-right
+corner and Session matches the primary action's height. Moving between
+application tiles also uses
+the Android TV focus sound, and any manual D-pad input cancels delayed default
+focus so navigation is never pulled back to the Resume action.
 
 The provider does not expose credentials or pairing certificates. Its signature
 permission limits access to applications signed with the same certificate. The
