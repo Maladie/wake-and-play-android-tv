@@ -617,18 +617,21 @@ public final class LauncherActivity extends Activity {
     }
 
     private View appCard(Host host, StreamApp app) {
-        LinearLayout card = cardBase(dp(285), dp(125));
+        LinearLayout card = cardBase(dp(285), dp(96));
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
 
         ImageView poster = new ImageView(this);
-        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        // Moonlight posters use a 2:3 portrait ratio (normally 600x900). Keep the
+        // complete cover visible instead of cropping its top and bottom into the
+        // old, almost-square thumbnail.
+        poster.setScaleType(ImageView.ScaleType.FIT_CENTER);
         GradientDrawable placeholder = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 new int[]{0xFF302255, 0xFF142A46});
         placeholder.setCornerRadius(dp(9));
         poster.setBackground(placeholder);
-        card.addView(poster, new LinearLayout.LayoutParams(dp(82), dp(96)));
+        card.addView(poster, new LinearLayout.LayoutParams(dp(48), dp(72)));
         loadPosterAsync(app.posterUri, poster);
 
         LinearLayout copy = new LinearLayout(this);
@@ -762,7 +765,9 @@ public final class LauncherActivity extends Activity {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
-            overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
+            // Moonlight X takes over with a matching loader. Avoid exposing an
+            // intermediate frame or cross-fading the two loading surfaces.
+            overridePendingTransition(0, 0);
         } catch (Exception error) {
             loadingMessage.setText("Compatible Moonlight X is not installed or does not accept the public launch intent.");
             loadingMessage.setTextColor(0xFFFF8A80);
