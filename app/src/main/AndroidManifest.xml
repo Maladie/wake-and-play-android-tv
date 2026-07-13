@@ -8,8 +8,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="com.limelight.unofficial.permission.READ_SAVED_HOSTS" />
+    <uses-permission android:name="com.limelight.unofficial.permission.READ_STREAM_STATUS" />
     <uses-permission android:name="com.limelight.permission.READ_SAVED_HOSTS" />
     <uses-permission android:name="com.limelight.permission.READ_STREAM_STATUS" />
+    <uses-permission android:name="com.limelight.debug.permission.READ_SAVED_HOSTS" />
+    <uses-permission android:name="com.limelight.debug.permission.READ_STREAM_STATUS" />
 
     <uses-feature android:name="android.software.leanback" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />

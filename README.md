@@ -80,4 +80,7 @@ Moonlight exposes two narrowly scoped integration surfaces:
   `com.limelight.extra.HOST_UUID` to open a saved host.
 
 The provider does not expose credentials or pairing certificates. Its signature
-permission limits access to applications signed with the same certificate.
+permission limits access to applications signed with the same certificate. The
+permission name follows the Moonlight package ID, for example
+`com.limelight.unofficial.permission.READ_SAVED_HOSTS` for the normal Moonlight
+X release.
