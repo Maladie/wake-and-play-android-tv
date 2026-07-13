@@ -16,6 +16,17 @@ couch-friendly entry point before Moonlight:
 
 ## Compatibility and signing
 
+The default runtime target is the normal Moonlight X application:
+
+```text
+package: com.limelight.unofficial
+label:   Moonlight
+```
+
+The `.debug` package is only a development fallback. Wake & Play does not
+require Moonlight Debug when the compatible normal Moonlight X build is
+installed.
+
 Moonlight X and Wake & Play must be signed with the same certificate. The
 saved-host and stream-status providers are protected by signature permissions.
 Local debug builds normally share Android's default debug keystore. Release
@@ -35,7 +46,8 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## Install
 
-Install a compatible Moonlight X build first, then the launcher:
+Install the compatible normal Moonlight X build first, then the launcher. The
+command below refers only to Wake & Play's local build artifact:
 
 ```powershell
 adb install -r app/build/outputs/apk/debug/app-debug.apk
