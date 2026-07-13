@@ -200,15 +200,6 @@ public final class LauncherActivity extends Activity {
         quickActionsParams.topMargin = dp(6);
         content.addView(quickActions, quickActionsParams);
 
-        TextView settingsButton = text("MOONLIGHT SETTINGS  ›", 13, 0xFFD2C4FF, true);
-        settingsButton.setFocusable(true);
-        settingsButton.setClickable(true);
-        settingsButton.setPadding(dp(12), dp(5), dp(12), dp(5));
-        settingsButton.setOnClickListener(v -> openMoonlightSettings());
-        settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
-        styleCompactButton(settingsButton, false);
-        quickActions.addView(settingsButton, wrap());
-
         resumeButton = text("", 13, 0xFFE8DDFF, true);
         resumeButton.setFocusable(true);
         resumeButton.setClickable(true);
@@ -221,9 +212,18 @@ public final class LauncherActivity extends Activity {
         });
         resumeButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(resumeButton, focused));
         styleCompactButton(resumeButton, false);
-        LinearLayout.LayoutParams resumeParams = wrap();
-        resumeParams.leftMargin = dp(10);
-        quickActions.addView(resumeButton, resumeParams);
+        quickActions.addView(resumeButton, wrap());
+
+        TextView settingsButton = text("⚙  OPTIONS", 13, 0xFFD2C4FF, true);
+        settingsButton.setFocusable(true);
+        settingsButton.setClickable(true);
+        settingsButton.setPadding(dp(12), dp(5), dp(12), dp(5));
+        settingsButton.setOnClickListener(v -> openMoonlightSettings());
+        settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
+        styleCompactButton(settingsButton, false);
+        LinearLayout.LayoutParams settingsParams = wrap();
+        settingsParams.leftMargin = dp(10);
+        quickActions.addView(settingsButton, settingsParams);
 
         TextView controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
@@ -884,7 +884,7 @@ public final class LauncherActivity extends Activity {
             app.name = appName;
             lastLaunchHost = host;
             lastLaunchApp = app;
-            resumeButton.setText("RESUME LAST · " + appName.toUpperCase(Locale.ROOT) + "  ›");
+            resumeButton.setText("▶  RESUME LAST · " + appName.toUpperCase(Locale.ROOT));
             resumeButton.setVisibility(View.VISIBLE);
             return;
         }
