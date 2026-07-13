@@ -142,6 +142,8 @@ public final class LauncherActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(64), dp(46), dp(64), dp(42));
+        content.setClipChildren(false);
+        content.setClipToPadding(false);
         homeLayer.addView(content, match());
 
         TextView title = text("WAKE & PLAY", 34, Color.WHITE, true);
