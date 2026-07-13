@@ -10,10 +10,13 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="com.limelight.unofficial.permission.READ_SAVED_HOSTS" />
     <uses-permission android:name="com.limelight.unofficial.permission.READ_STREAM_STATUS" />
+    <uses-permission android:name="com.limelight.unofficial.permission.READ_SAVED_APPS" />
     <uses-permission android:name="com.limelight.permission.READ_SAVED_HOSTS" />
     <uses-permission android:name="com.limelight.permission.READ_STREAM_STATUS" />
+    <uses-permission android:name="com.limelight.permission.READ_SAVED_APPS" />
     <uses-permission android:name="com.limelight.debug.permission.READ_SAVED_HOSTS" />
     <uses-permission android:name="com.limelight.debug.permission.READ_STREAM_STATUS" />
+    <uses-permission android:name="com.limelight.debug.permission.READ_SAVED_APPS" />
 
     <uses-feature android:name="android.software.leanback" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
@@ -26,6 +29,9 @@
         <provider android:authorities="streamstatus.com.limelight.unofficial" />
         <provider android:authorities="streamstatus.com.limelight" />
         <provider android:authorities="streamstatus.com.limelight.debug" />
+        <provider android:authorities="apps.com.limelight.unofficial" />
+        <provider android:authorities="apps.com.limelight" />
+        <provider android:authorities="apps.com.limelight.debug" />
         <package android:name="com.limelight.unofficial" />
         <package android:name="com.limelight" />
         <package android:name="com.limelight.debug" />

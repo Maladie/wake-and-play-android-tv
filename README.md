@@ -7,12 +7,14 @@ couch-friendly entry point before Moonlight:
 - opens per-controller actions for identification, power-off and Bluetooth
   unpairing, with confirmation before destructive actions;
 - reads the saved Vibepollo/Sunshine hosts from Moonlight;
+- displays Moonlight's cached applications and poster art in its own TV UI;
 - sends Wake-on-LAN to the selected host;
 - displays a native-resolution animated loading slideshow with rotating English
   status messages;
 - waits for the host streaming ports to become reachable;
-- opens the selected host's application list through Moonlight's public launch
-  intent.
+- starts the selected application directly through Moonlight's public launch
+  intent and returns to Wake & Play when the stream ends;
+- opens Moonlight's real streaming settings from the launcher.
 
 ## Compatibility and signing
 
@@ -91,12 +93,16 @@ controller unchanged and offers a shortcut to the system Bluetooth settings.
 
 ## Integration contract
 
-Moonlight exposes two narrowly scoped integration surfaces:
+Moonlight exposes narrowly scoped integration surfaces:
 
 - a read-only saved-host provider derived from the Moonlight package, for
   example `content://hosts.com.limelight.unofficial/hosts`;
+- a same-signature cached-app provider, for example
+  `content://apps.com.limelight.unofficial/apps/<host-uuid>`;
 - the public action `com.limelight.action.STREAM` with
-  `com.limelight.extra.HOST_UUID` to open a saved host.
+  host/app identifiers and `com.limelight.extra.EXTERNAL_FRONTEND=true` to
+  start a shell-owned session without leaving Moonlight's host UI underneath;
+- `com.limelight.action.OPEN_SETTINGS` for the real Moonlight settings screen.
 
 The provider does not expose credentials or pairing certificates. Its signature
 permission limits access to applications signed with the same certificate. The

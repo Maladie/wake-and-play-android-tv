@@ -9,6 +9,8 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Shader;
@@ -29,6 +31,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -63,16 +66,23 @@ public final class LauncherActivity extends Activity {
             new MoonlightTarget("com.limelight.debug")
     };
     private static final String ACTION_STREAM = "com.limelight.action.STREAM";
+    private static final String ACTION_OPEN_SETTINGS = "com.limelight.action.OPEN_SETTINGS";
     private static final String EXTRA_HOST_UUID = "com.limelight.extra.HOST_UUID";
+    private static final String EXTRA_APP_ID = "com.limelight.extra.APP_ID";
+    private static final String EXTRA_APP_NAME = "com.limelight.extra.APP_NAME";
+    private static final String EXTRA_EXTERNAL_FRONTEND = "com.limelight.extra.EXTERNAL_FRONTEND";
     private static final long HOST_TIMEOUT_MS = 90_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final AtomicBoolean launchCancelled = new AtomicBoolean(false);
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
+    private LinearLayout appRow;
     private TextView emptyState;
+    private TextView appsLabel;
+    private TextView appEmptyState;
     private TextView sessionState;
     private FrameLayout homeLayer;
     private FrameLayout loadingLayer;
@@ -84,6 +94,8 @@ public final class LauncherActivity extends Activity {
     private int lastLoadingMessageIndex = -1;
     private ControllerInfo pendingController;
     private BluetoothAction pendingBluetoothAction;
+    private Host selectedHost;
+    private View selectedHostCard;
     private final String[] loadingMessages = {
             "Loading content…",
             "Combobulating resources…",
@@ -156,14 +168,14 @@ public final class LauncherActivity extends Activity {
         homeLayer.addView(new GenerativeBackdrop(this), match());
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(64), dp(46), dp(64), dp(42));
+        content.setPadding(dp(64), dp(26), dp(64), dp(24));
         content.setClipChildren(false);
         content.setClipToPadding(false);
         homeLayer.addView(content, match());
 
-        TextView title = text("WAKE & PLAY", 34, Color.WHITE, true);
+        TextView title = text("WAKE & PLAY", 30, Color.WHITE, true);
         content.addView(title, wrap());
-        TextView subtitle = text("Choose a host. We will wake it and hand over to Moonlight when it is ready.", 16, 0xFFBCC3DD, false);
+        TextView subtitle = text("Choose a host and application. We will wake the PC and start the stream.", 15, 0xFFBCC3DD, false);
         LinearLayout.LayoutParams subtitleParams = wrap();
         subtitleParams.topMargin = dp(5);
         content.addView(subtitle, subtitleParams);
@@ -173,32 +185,58 @@ public final class LauncherActivity extends Activity {
         sessionParams.topMargin = dp(9);
         content.addView(sessionState, sessionParams);
 
+        TextView settingsButton = text("MOONLIGHT SETTINGS  ›", 13, 0xFFD2C4FF, true);
+        settingsButton.setFocusable(true);
+        settingsButton.setClickable(true);
+        settingsButton.setPadding(dp(12), dp(5), dp(12), dp(5));
+        settingsButton.setOnClickListener(v -> openMoonlightSettings());
+        settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
+        styleCompactButton(settingsButton, false);
+        LinearLayout.LayoutParams settingsParams = wrap();
+        settingsParams.topMargin = dp(6);
+        content.addView(settingsButton, settingsParams);
+
         TextView controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
-        sectionParams.topMargin = dp(30);
+        sectionParams.topMargin = dp(11);
         content.addView(controllersLabel, sectionParams);
         HorizontalScrollView controllerScroll = horizontalScroll();
         controllerRow = horizontalRow();
         controllerScroll.addView(controllerRow);
-        LinearLayout.LayoutParams controllerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(82));
-        controllerParams.topMargin = dp(9);
+        LinearLayout.LayoutParams controllerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58));
+        controllerParams.topMargin = dp(5);
         content.addView(controllerScroll, controllerParams);
 
         TextView hostsLabel = sectionLabel("STREAMING HOSTS");
         LinearLayout.LayoutParams hostsLabelParams = wrap();
-        hostsLabelParams.topMargin = dp(25);
+        hostsLabelParams.topMargin = dp(11);
         content.addView(hostsLabel, hostsLabelParams);
         HorizontalScrollView hostScroll = horizontalScroll();
         hostRow = horizontalRow();
         hostScroll.addView(hostRow);
-        LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        hostParams.topMargin = dp(10);
+        LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(118));
+        hostParams.topMargin = dp(6);
         content.addView(hostScroll, hostParams);
 
         emptyState = text("No saved hosts found in a compatible Moonlight X installation.", 17, 0xFFBDC4D8, false);
         emptyState.setGravity(Gravity.CENTER);
         emptyState.setVisibility(View.GONE);
         content.addView(emptyState, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(80)));
+
+        appsLabel = sectionLabel("APPS");
+        LinearLayout.LayoutParams appsLabelParams = wrap();
+        appsLabelParams.topMargin = dp(10);
+        content.addView(appsLabel, appsLabelParams);
+        HorizontalScrollView appScroll = horizontalScroll();
+        appRow = horizontalRow();
+        appScroll.addView(appRow);
+        LinearLayout.LayoutParams appParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        appParams.topMargin = dp(5);
+        content.addView(appScroll, appParams);
+
+        appEmptyState = text("Choose a streaming host to see its applications.", 16, 0xFFBDC4D8, false);
+        appEmptyState.setGravity(Gravity.CENTER);
+        appRow.addView(appEmptyState, new LinearLayout.LayoutParams(dp(560), ViewGroup.LayoutParams.MATCH_PARENT));
 
         loadingLayer = new FrameLayout(this);
         loadingLayer.setVisibility(View.GONE);
@@ -354,9 +392,9 @@ public final class LauncherActivity extends Activity {
         String name = controller.name;
         int percentage = controller.percentage;
         boolean charging = controller.charging;
-        LinearLayout card = cardBase(dp(245), dp(68));
-        TextView icon = text("🎮", 27, Color.WHITE, false);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(44), ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout card = cardBase(dp(220), dp(50));
+        TextView icon = text("🎮", 23, Color.WHITE, false);
+        card.addView(icon, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
         TextView label = text("P" + player + "  " + compactControllerName(name), 14, Color.WHITE, true);
@@ -495,45 +533,154 @@ public final class LauncherActivity extends Activity {
 
     private void renderHosts(List<Host> hosts) {
         hostRow.removeAllViews();
+        selectedHostCard = null;
         emptyState.setVisibility(hosts.isEmpty() ? View.VISIBLE : View.GONE);
         for (Host host : hosts) {
-            hostRow.addView(hostCard(host), cardSpacing());
+            View card = hostCard(host);
+            hostRow.addView(card, cardSpacing());
+            if (selectedHost != null && host.uuid.equals(selectedHost.uuid)) {
+                selectedHostCard = card;
+                selectedHost = host;
+                styleCard(card, true);
+            }
         }
-        if (!hosts.isEmpty()) hostRow.getChildAt(0).requestFocus();
+        if (!hosts.isEmpty()) {
+            if (selectedHostCard == null) {
+                selectedHostCard = hostRow.getChildAt(0);
+                styleCard(selectedHostCard, true);
+                selectHost(hosts.get(0), false);
+                selectedHostCard.requestFocus();
+            }
+        } else {
+            selectedHost = null;
+            renderApps(null, Collections.emptyList());
+        }
     }
 
     private View hostCard(Host host) {
-        LinearLayout card = cardBase(dp(310), dp(165));
+        LinearLayout card = cardBase(dp(270), dp(105));
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        TextView icon = text("▣", 34, 0xFFB99CFF, true);
+        TextView icon = text("▣", 24, 0xFFB99CFF, true);
         card.addView(icon, wrap());
-        TextView name = text(host.name, 21, Color.WHITE, true);
+        TextView name = text(host.name, 18, Color.WHITE, true);
         name.setSingleLine(true);
-        LinearLayout.LayoutParams nameParams = wrap(); nameParams.topMargin = dp(8);
+        LinearLayout.LayoutParams nameParams = wrap(); nameParams.topMargin = dp(3);
         card.addView(name, nameParams);
-        TextView address = text(host.address != null ? host.address : "Address unavailable", 13, 0xFFABB3CA, false);
+        TextView address = text(host.address != null ? host.address : "Address unavailable", 12, 0xFFABB3CA, false);
         address.setSingleLine(true);
-        LinearLayout.LayoutParams addrParams = wrap(); addrParams.topMargin = dp(4);
+        LinearLayout.LayoutParams addrParams = wrap(); addrParams.topMargin = dp(2);
         card.addView(address, addrParams);
-        TextView action = text("WAKE AND OPEN  ›", 13, 0xFFB99CFF, true);
-        LinearLayout.LayoutParams actionParams = wrap(); actionParams.topMargin = dp(15);
-        card.addView(action, actionParams);
-        card.setOnClickListener(v -> beginHostLaunch(host));
+        card.setOnClickListener(v -> {
+            if (selectedHostCard != null && selectedHostCard != card) styleCard(selectedHostCard, false);
+            selectedHostCard = card;
+            styleCard(card, true);
+            selectHost(host, true);
+        });
+        card.setOnFocusChangeListener((v, focused) ->
+                styleCard(card, focused || card == selectedHostCard));
+        return card;
+    }
+
+    private void selectHost(Host host, boolean moveFocusToApps) {
+        selectedHost = host;
+        appsLabel.setText("APPS · " + host.name.toUpperCase(Locale.ROOT));
+        appRow.removeAllViews();
+        TextView loading = text("Loading cached applications…", 16, 0xFFBDC4D8, false);
+        appRow.addView(loading, new LinearLayout.LayoutParams(dp(420), ViewGroup.LayoutParams.MATCH_PARENT));
+        executor.execute(() -> {
+            List<StreamApp> apps = loadApps(host);
+            mainHandler.post(() -> {
+                if (selectedHost == null || !host.uuid.equals(selectedHost.uuid)) return;
+                renderApps(host, apps);
+                if (moveFocusToApps && !apps.isEmpty()) appRow.getChildAt(0).requestFocus();
+            });
+        });
+    }
+
+    private void renderApps(Host host, List<StreamApp> apps) {
+        appRow.removeAllViews();
+        if (host == null) {
+            appsLabel.setText("APPS");
+            appRow.addView(text("Choose a streaming host to see its applications.", 16, 0xFFBDC4D8, false),
+                    new LinearLayout.LayoutParams(dp(560), ViewGroup.LayoutParams.MATCH_PARENT));
+            return;
+        }
+        if (apps.isEmpty()) {
+            appRow.addView(text("No cached applications found. Refresh this host once in Moonlight X.", 16, 0xFFFFB74D, false),
+                    new LinearLayout.LayoutParams(dp(720), ViewGroup.LayoutParams.MATCH_PARENT));
+            return;
+        }
+        for (StreamApp app : apps) {
+            appRow.addView(appCard(host, app), cardSpacing());
+        }
+    }
+
+    private View appCard(Host host, StreamApp app) {
+        LinearLayout card = cardBase(dp(285), dp(125));
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView poster = new ImageView(this);
+        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        GradientDrawable placeholder = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{0xFF302255, 0xFF142A46});
+        placeholder.setCornerRadius(dp(9));
+        poster.setBackground(placeholder);
+        card.addView(poster, new LinearLayout.LayoutParams(dp(82), dp(96)));
+        loadPosterAsync(app.posterUri, poster);
+
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = text(app.name, 16, Color.WHITE, true);
+        name.setSingleLine(true);
+        copy.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView action = text("PLAY  ›", 12, 0xFFB99CFF, true);
+        LinearLayout.LayoutParams actionParams = wrap();
+        actionParams.topMargin = dp(10);
+        copy.addView(action, actionParams);
+        LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+        copyParams.leftMargin = dp(14);
+        card.addView(copy, copyParams);
+        card.setOnClickListener(v -> beginAppLaunch(host, app));
         card.setOnFocusChangeListener((v, focused) -> styleCard(card, focused));
         return card;
     }
 
-    private void beginHostLaunch(Host host) {
+    private void loadPosterAsync(Uri uri, ImageView target) {
+        if (uri == null) return;
+        executor.execute(() -> {
+            try {
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                    BitmapFactory.decodeStream(input, null, bounds);
+                }
+                int sample = 1;
+                while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2;
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inSampleSize = Math.max(1, sample);
+                Bitmap bitmap;
+                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                    bitmap = BitmapFactory.decodeStream(input, null, options);
+                }
+                if (bitmap != null) mainHandler.post(() -> target.setImageBitmap(bitmap));
+            } catch (Exception ignored) { }
+        });
+    }
+
+    private void beginAppLaunch(Host host, StreamApp app) {
         launchCancelled.set(false);
         homeLayer.setVisibility(View.GONE);
         loadingLayer.setVisibility(View.VISIBLE);
-        loadingTitle.setText(host.name);
+        loadingTitle.setText(app.name);
         setLoadingStatus("Preparing wake sequence...");
         lastLoadingMessageIndex = -1;
         rotateLoadingMessage();
         slideshow.start();
-        executor.execute(() -> wakeAndWait(host));
+        executor.execute(() -> wakeAndWait(host, app));
     }
 
     private void rotateLoadingMessage() {
@@ -550,7 +697,7 @@ public final class LauncherActivity extends Activity {
         mainHandler.postDelayed(this::rotateLoadingMessage, 2100);
     }
 
-    private void wakeAndWait(Host host) {
+    private void wakeAndWait(Host host, StreamApp app) {
         long deadline = System.currentTimeMillis() + HOST_TIMEOUT_MS;
         long nextWake = 0;
         setLoadingStatus("Checking " + host.address + " for a running streaming host...");
@@ -558,7 +705,7 @@ public final class LauncherActivity extends Activity {
             int readyPort = findReadyPort(host);
             if (readyPort > 0) {
                 setLoadingStatus("Host responded on port " + readyPort + ". Starting Moonlight...");
-                mainHandler.postDelayed(() -> openMoonlight(host), 350);
+                mainHandler.postDelayed(() -> openMoonlight(host, app), 350);
                 return;
             }
             if (System.currentTimeMillis() >= nextWake) {
@@ -602,13 +749,16 @@ public final class LauncherActivity extends Activity {
         else mainHandler.post(update);
     }
 
-    private void openMoonlight(Host host) {
+    private void openMoonlight(Host host, StreamApp app) {
         if (launchCancelled.get()) return;
         setLoadingStatus("Opening Moonlight for " + host.name + "...");
         slideshow.stop();
         Intent intent = new Intent(ACTION_STREAM);
         intent.setPackage(host.moonlightPackage);
         intent.putExtra(EXTRA_HOST_UUID, host.uuid);
+        intent.putExtra(EXTRA_APP_ID, String.valueOf(app.appId));
+        intent.putExtra(EXTRA_APP_NAME, app.name);
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND, true);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
@@ -648,6 +798,47 @@ public final class LauncherActivity extends Activity {
             }
         }
         return Collections.emptyList();
+    }
+
+    private List<StreamApp> loadApps(Host host) {
+        Uri uri = Uri.parse("content://apps." + host.moonlightPackage + "/apps/" + Uri.encode(host.uuid));
+        List<StreamApp> apps = new ArrayList<>();
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor == null) return apps;
+            while (cursor.moveToNext()) {
+                StreamApp app = new StreamApp();
+                app.appId = integer(cursor, "app_id", -1);
+                app.name = value(cursor, "name");
+                String poster = value(cursor, "poster_uri");
+                app.posterUri = poster != null ? Uri.parse(poster) : null;
+                if (app.appId >= 0 && app.name != null) apps.add(app);
+            }
+            Log.i(TAG, "Loaded " + apps.size() + " app(s) from " + uri);
+        } catch (RuntimeException error) {
+            Log.e(TAG, "Unable to query cached apps from " + uri, error);
+        }
+        apps.sort(Comparator.comparing(app -> app.name.toLowerCase(Locale.ROOT)));
+        return apps;
+    }
+
+    private void openMoonlightSettings() {
+        List<String> packages = new ArrayList<>();
+        if (selectedHost != null) packages.add(selectedHost.moonlightPackage);
+        for (MoonlightTarget target : MOONLIGHT_TARGETS) {
+            if (!packages.contains(target.packageName)) packages.add(target.packageName);
+        }
+        for (String packageName : packages) {
+            Intent intent = new Intent(ACTION_OPEN_SETTINGS);
+            intent.setPackage(packageName);
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            if (intent.resolveActivity(getPackageManager()) == null) continue;
+            try {
+                startActivity(intent);
+                overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
+                return;
+            } catch (RuntimeException ignored) { }
+        }
+        Toast.makeText(this, "Compatible Moonlight X settings are not available.", Toast.LENGTH_LONG).show();
     }
 
     private void sendWakeOnLan(String mac) {
@@ -729,6 +920,14 @@ public final class LauncherActivity extends Activity {
         card.setScaleY(focused ? 1.045f : 1f);
     }
 
+    private void styleCompactButton(View button, boolean focused) {
+        GradientDrawable background = new GradientDrawable();
+        background.setCornerRadius(dp(10));
+        background.setColor(focused ? 0xFF56418F : 0x65181C2B);
+        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFFFFFFF : 0x387C89B2);
+        button.setBackground(background);
+    }
+
     private TextView sectionLabel(String value) { return text(value, 13, 0xFF9CA6C5, true); }
     private TextView text(String value, float size, int color, boolean bold) {
         TextView view = new TextView(this);
@@ -801,6 +1000,7 @@ public final class LauncherActivity extends Activity {
         String moonlightPackage;
         int port;
     }
+    private static final class StreamApp { int appId; String name; Uri posterUri; }
     private static final class StreamStatus { String state; String stage; String app; String computer; int bitrateKbps; }
 
     private static class GenerativeBackdrop extends View {
