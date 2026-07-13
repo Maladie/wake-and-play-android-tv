@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Canvas;
@@ -73,6 +74,10 @@ public final class LauncherActivity extends Activity {
     private static final String EXTRA_EXTERNAL_FRONTEND = "com.limelight.extra.EXTERNAL_FRONTEND";
     private static final long HOST_TIMEOUT_MS = 90_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
+    private static final String HISTORY_PREFS = "launch_history";
+    private static final String PREF_LAST_HOST_UUID = "last_host_uuid";
+    private static final String PREF_LAST_APP_ID = "last_app_id";
+    private static final String PREF_LAST_APP_NAME = "last_app_name";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
@@ -84,6 +89,7 @@ public final class LauncherActivity extends Activity {
     private TextView appsLabel;
     private TextView appEmptyState;
     private TextView sessionState;
+    private TextView resumeButton;
     private FrameLayout homeLayer;
     private FrameLayout loadingLayer;
     private GenerativeSlideshow slideshow;
@@ -96,6 +102,8 @@ public final class LauncherActivity extends Activity {
     private BluetoothAction pendingBluetoothAction;
     private Host selectedHost;
     private View selectedHostCard;
+    private Host lastLaunchHost;
+    private StreamApp lastLaunchApp;
     private final String[] loadingMessages = {
             "Loading content…",
             "Combobulating resources…",
@@ -185,6 +193,13 @@ public final class LauncherActivity extends Activity {
         sessionParams.topMargin = dp(9);
         content.addView(sessionState, sessionParams);
 
+        LinearLayout quickActions = new LinearLayout(this);
+        quickActions.setOrientation(LinearLayout.HORIZONTAL);
+        quickActions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams quickActionsParams = wrap();
+        quickActionsParams.topMargin = dp(6);
+        content.addView(quickActions, quickActionsParams);
+
         TextView settingsButton = text("MOONLIGHT SETTINGS  ›", 13, 0xFFD2C4FF, true);
         settingsButton.setFocusable(true);
         settingsButton.setClickable(true);
@@ -192,9 +207,23 @@ public final class LauncherActivity extends Activity {
         settingsButton.setOnClickListener(v -> openMoonlightSettings());
         settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
         styleCompactButton(settingsButton, false);
-        LinearLayout.LayoutParams settingsParams = wrap();
-        settingsParams.topMargin = dp(6);
-        content.addView(settingsButton, settingsParams);
+        quickActions.addView(settingsButton, wrap());
+
+        resumeButton = text("", 13, 0xFFE8DDFF, true);
+        resumeButton.setFocusable(true);
+        resumeButton.setClickable(true);
+        resumeButton.setPadding(dp(12), dp(5), dp(12), dp(5));
+        resumeButton.setVisibility(View.GONE);
+        resumeButton.setOnClickListener(v -> {
+            if (lastLaunchHost != null && lastLaunchApp != null) {
+                beginAppLaunch(lastLaunchHost, lastLaunchApp);
+            }
+        });
+        resumeButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(resumeButton, focused));
+        styleCompactButton(resumeButton, false);
+        LinearLayout.LayoutParams resumeParams = wrap();
+        resumeParams.leftMargin = dp(10);
+        quickActions.addView(resumeButton, resumeParams);
 
         TextView controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
@@ -534,6 +563,7 @@ public final class LauncherActivity extends Activity {
     private void renderHosts(List<Host> hosts) {
         hostRow.removeAllViews();
         selectedHostCard = null;
+        resolveLastLaunch(hosts);
         emptyState.setVisibility(hosts.isEmpty() ? View.VISIBLE : View.GONE);
         for (Host host : hosts) {
             View card = hostCard(host);
@@ -765,6 +795,7 @@ public final class LauncherActivity extends Activity {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
+            rememberLastLaunch(host, app);
             // Moonlight X takes over with a matching loader. Avoid exposing an
             // intermediate frame or cross-fading the two loading surfaces.
             overridePendingTransition(0, 0);
@@ -795,7 +826,10 @@ public final class LauncherActivity extends Activity {
                     host.macAddress = value(cursor, "mac_address");
                     if (host.uuid != null && host.name != null) hosts.add(host);
                 }
-                hosts.sort(Comparator.comparing(h -> h.name.toLowerCase(Locale.ROOT)));
+                String lastHostUuid = history().getString(PREF_LAST_HOST_UUID, null);
+                hosts.sort(Comparator
+                        .comparingInt((Host host) -> host.uuid.equals(lastHostUuid) ? 0 : 1)
+                        .thenComparing(host -> host.name.toLowerCase(Locale.ROOT)));
                 Log.i(TAG, "Loaded " + hosts.size() + " host(s) from " + uri);
                 if (!hosts.isEmpty()) return hosts;
             } catch (RuntimeException error) {
@@ -822,8 +856,52 @@ public final class LauncherActivity extends Activity {
         } catch (RuntimeException error) {
             Log.e(TAG, "Unable to query cached apps from " + uri, error);
         }
-        apps.sort(Comparator.comparing(app -> app.name.toLowerCase(Locale.ROOT)));
+        SharedPreferences history = history();
+        String lastHostUuid = history.getString(PREF_LAST_HOST_UUID, null);
+        int lastAppId = history.getInt(PREF_LAST_APP_ID, -1);
+        boolean isLastHost = host.uuid.equals(lastHostUuid);
+        apps.sort(Comparator
+                .comparingInt((StreamApp app) -> isLastHost && app.appId == lastAppId ? 0 : 1)
+                .thenComparing(app -> app.name.toLowerCase(Locale.ROOT)));
         return apps;
+    }
+
+    private void resolveLastLaunch(List<Host> hosts) {
+        lastLaunchHost = null;
+        lastLaunchApp = null;
+        resumeButton.setVisibility(View.GONE);
+
+        SharedPreferences history = history();
+        String hostUuid = history.getString(PREF_LAST_HOST_UUID, null);
+        int appId = history.getInt(PREF_LAST_APP_ID, -1);
+        String appName = history.getString(PREF_LAST_APP_NAME, null);
+        if (hostUuid == null || appId < 0 || appName == null) return;
+
+        for (Host host : hosts) {
+            if (!hostUuid.equals(host.uuid)) continue;
+            StreamApp app = new StreamApp();
+            app.appId = appId;
+            app.name = appName;
+            lastLaunchHost = host;
+            lastLaunchApp = app;
+            resumeButton.setText("RESUME LAST · " + appName.toUpperCase(Locale.ROOT) + "  ›");
+            resumeButton.setVisibility(View.VISIBLE);
+            return;
+        }
+    }
+
+    private void rememberLastLaunch(Host host, StreamApp app) {
+        history().edit()
+                .putString(PREF_LAST_HOST_UUID, host.uuid)
+                .putInt(PREF_LAST_APP_ID, app.appId)
+                .putString(PREF_LAST_APP_NAME, app.name)
+                .apply();
+        lastLaunchHost = host;
+        lastLaunchApp = app;
+    }
+
+    private SharedPreferences history() {
+        return getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE);
     }
 
     private void openMoonlightSettings() {
