@@ -32,31 +32,50 @@ saved-host and stream-status providers are protected by signature permissions.
 Local debug builds normally share Android's default debug keystore. Release
 builds must be configured to use the same release keystore in both projects.
 
-## Build
+## Download and install
 
-```powershell
-.\gradlew.bat :app:assembleDebug
-```
-
-Outputs:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-## Install
-
-Install the compatible normal Moonlight X build first, then the launcher. The
-command below refers only to Wake & Play's local build artifact:
-
-```powershell
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+Download the signed APK from the project's
+[Releases](https://github.com/Maladie/wake-and-play-android-tv/releases) page.
+Install the compatible normal Moonlight X build first, then install Wake & Play.
+The APK can be transferred to Android TV with any sideloading tool or file
+manager; ADB is optional.
 
 The launcher prefers the normal Moonlight X package
 `com.limelight.unofficial`. It also supports compatible builds using
 `com.limelight` and falls back to `com.limelight.debug` for development. Hosts
 must first be added and paired in the selected Moonlight installation.
+
+## Build a signed release
+
+Wake & Play and Moonlight X must use the same signing keystore. Build the
+installable release with:
+
+```powershell
+.\build-release.bat `
+  -Keystore "C:\path\to\shared-release.keystore" `
+  -StorePassword "..." `
+  -KeyAlias "..." `
+  -KeyPassword "..."
+```
+
+Output:
+
+```text
+app/build/outputs/apk/release/app-release.apk
+```
+
+For local testing, running `build-release.bat` without arguments uses Android's
+standard local debug keystore. Public releases should always use a backed-up,
+dedicated keystore shared with the corresponding Moonlight X release.
+
+## Development build
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+This produces `app/build/outputs/apk/debug/app-debug.apk`. The debug build is
+intended for development and is not the package distributed to users.
 
 ## Controller actions
 

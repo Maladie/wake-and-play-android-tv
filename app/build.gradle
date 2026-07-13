@@ -2,6 +2,18 @@ plugins {
     id 'com.android.application'
 }
 
+def releaseKeystore = providers.gradleProperty('wakeAndPlayKeystore')
+        .orElse(providers.environmentVariable('WAKE_AND_PLAY_KEYSTORE'))
+def releaseStorePassword = providers.gradleProperty('wakeAndPlayStorePassword')
+        .orElse(providers.environmentVariable('WAKE_AND_PLAY_STORE_PASSWORD'))
+def releaseKeyAlias = providers.gradleProperty('wakeAndPlayKeyAlias')
+        .orElse(providers.environmentVariable('WAKE_AND_PLAY_KEY_ALIAS'))
+def releaseKeyPassword = providers.gradleProperty('wakeAndPlayKeyPassword')
+        .orElse(providers.environmentVariable('WAKE_AND_PLAY_KEY_PASSWORD'))
+def hasReleaseSigning = releaseKeystore.isPresent() &&
+        releaseStorePassword.isPresent() && releaseKeyAlias.isPresent() &&
+        releaseKeyPassword.isPresent()
+
 android {
     namespace 'com.limelight.launcher'
     compileSdk 34
@@ -17,5 +29,41 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseKeystore.get())
+                storePassword releaseStorePassword.get()
+                keyAlias releaseKeyAlias.get()
+                keyPassword releaseKeyPassword.get()
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+tasks.register('verifyReleaseSigningConfigured') {
+    doLast {
+        if (!hasReleaseSigning) {
+            throw new GradleException('Release signing is not configured. Use build-release.bat or set WAKE_AND_PLAY_* variables.')
+        }
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name == 'assembleRelease' || task.name == 'bundleRelease') {
+        task.dependsOn tasks.named('verifyReleaseSigningConfigured')
     }
 }
