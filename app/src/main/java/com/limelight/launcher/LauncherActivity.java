@@ -14,6 +14,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.PixelFormat;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.BatteryState;
@@ -50,9 +51,11 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -67,6 +70,7 @@ public final class LauncherActivity extends Activity {
             new MoonlightTarget("com.limelight.debug")
     };
     private static final String ACTION_STREAM = "com.limelight.action.STREAM";
+    private static final String ACTION_RETURN_STREAM = "com.limelight.action.RETURN_STREAM";
     private static final String ACTION_OPEN_SETTINGS = "com.limelight.action.OPEN_SETTINGS";
     private static final String EXTRA_HOST_UUID = "com.limelight.extra.HOST_UUID";
     private static final String EXTRA_APP_ID = "com.limelight.extra.APP_ID";
@@ -78,10 +82,16 @@ public final class LauncherActivity extends Activity {
     private static final String PREF_LAST_HOST_UUID = "last_host_uuid";
     private static final String PREF_LAST_APP_ID = "last_app_id";
     private static final String PREF_LAST_APP_NAME = "last_app_name";
+    private static final String PREF_LAST_LAUNCH_AT = "last_launch_at";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final AtomicBoolean launchCancelled = new AtomicBoolean(false);
+    private final AtomicBoolean hostProbeRunning = new AtomicBoolean(false);
+    private final Map<String, TextView> hostStatusViews = new HashMap<>();
+    private List<Host> visibleHosts = Collections.emptyList();
+    private StreamStatus currentStreamStatus;
+    private long lastHostProbeAt;
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
     private LinearLayout appRow;
@@ -131,6 +141,10 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        // LauncherTheme is translucent so the stream Surface remains alive, but
+        // this UI draws every pixel. An opaque buffer avoids partial-redraw
+        // artifacts on Android TV compositors while preserving that lifecycle.
+        getWindow().setFormat(PixelFormat.OPAQUE);
         setContentView(buildUi());
         hideSystemUi();
     }
@@ -206,7 +220,9 @@ public final class LauncherActivity extends Activity {
         resumeButton.setPadding(dp(12), dp(5), dp(12), dp(5));
         resumeButton.setVisibility(View.GONE);
         resumeButton.setOnClickListener(v -> {
-            if (lastLaunchHost != null && lastLaunchApp != null) {
+            if (isActiveStream(currentStreamStatus)) {
+                returnToActiveStream(currentStreamStatus.moonlightPackage);
+            } else if (lastLaunchHost != null && lastLaunchApp != null) {
                 beginAppLaunch(lastLaunchHost, lastLaunchApp);
             }
         });
@@ -334,9 +350,14 @@ public final class LauncherActivity extends Activity {
                     StreamStatus status = new StreamStatus();
                     status.state = value(cursor, "state");
                     status.stage = value(cursor, "stage");
+                    status.host = value(cursor, "host");
                     status.app = value(cursor, "app");
                     status.computer = value(cursor, "computer");
                     status.bitrateKbps = integer(cursor, "bitrate_kbps", 0);
+                    status.activityAlive = integer(cursor, "activity_alive", 0) != 0;
+                    status.startedAt = longValue(cursor, "started_at", 0L);
+                    status.updatedAt = longValue(cursor, "updated_at", 0L);
+                    status.moonlightPackage = target.packageName;
                     return status;
                 }
             } catch (RuntimeException error) {
@@ -347,8 +368,22 @@ public final class LauncherActivity extends Activity {
     }
 
     private void renderStreamStatus(StreamStatus status) {
+        currentStreamStatus = status;
+        updateResumeAction();
+        updateSessionHostStatus();
+        if (System.currentTimeMillis() - lastHostProbeAt >= 10_000) {
+            refreshHostAvailabilityAsync();
+        }
         if (status == null || status.state == null || status.state.isEmpty()) {
             sessionState.setText("MOONLIGHT · STATUS UNAVAILABLE");
+            sessionState.setTextColor(0xFF9CA6C5);
+            return;
+        }
+        if (isActiveState(status.state) && !status.activityAlive) {
+            StringBuilder idle = new StringBuilder("MOONLIGHT · IDLE");
+            if (status.app != null && !status.app.isEmpty()) idle.append(" · LAST: ").append(status.app);
+            if (status.updatedAt > 0) idle.append(" · ").append(formatRelative(System.currentTimeMillis() - status.updatedAt));
+            sessionState.setText(idle.toString());
             sessionState.setTextColor(0xFF9CA6C5);
             return;
         }
@@ -562,6 +597,8 @@ public final class LauncherActivity extends Activity {
 
     private void renderHosts(List<Host> hosts) {
         hostRow.removeAllViews();
+        hostStatusViews.clear();
+        visibleHosts = new ArrayList<>(hosts);
         selectedHostCard = null;
         resolveLastLaunch(hosts);
         emptyState.setVisibility(hosts.isEmpty() ? View.VISIBLE : View.GONE);
@@ -585,6 +622,8 @@ public final class LauncherActivity extends Activity {
             selectedHost = null;
             renderApps(null, Collections.emptyList());
         }
+        updateSessionHostStatus();
+        refreshHostAvailabilityAsync();
     }
 
     private View hostCard(Host host) {
@@ -597,10 +636,11 @@ public final class LauncherActivity extends Activity {
         name.setSingleLine(true);
         LinearLayout.LayoutParams nameParams = wrap(); nameParams.topMargin = dp(3);
         card.addView(name, nameParams);
-        TextView address = text(host.address != null ? host.address : "Address unavailable", 12, 0xFFABB3CA, false);
+        TextView address = text("CHECKING · " + (host.address != null ? host.address : "Address unavailable"), 11, 0xFFABB3CA, false);
         address.setSingleLine(true);
         LinearLayout.LayoutParams addrParams = wrap(); addrParams.topMargin = dp(2);
         card.addView(address, addrParams);
+        hostStatusViews.put(host.uuid, address);
         card.setOnClickListener(v -> {
             if (selectedHostCard != null && selectedHostCard != card) styleCard(selectedHostCard, false);
             selectedHostCard = card;
@@ -869,7 +909,7 @@ public final class LauncherActivity extends Activity {
     private void resolveLastLaunch(List<Host> hosts) {
         lastLaunchHost = null;
         lastLaunchApp = null;
-        resumeButton.setVisibility(View.GONE);
+        updateResumeAction();
 
         SharedPreferences history = history();
         String hostUuid = history.getString(PREF_LAST_HOST_UUID, null);
@@ -884,8 +924,7 @@ public final class LauncherActivity extends Activity {
             app.name = appName;
             lastLaunchHost = host;
             lastLaunchApp = app;
-            resumeButton.setText("▶  RESUME LAST · " + appName.toUpperCase(Locale.ROOT));
-            resumeButton.setVisibility(View.VISIBLE);
+            updateResumeAction();
             return;
         }
     }
@@ -895,9 +934,133 @@ public final class LauncherActivity extends Activity {
                 .putString(PREF_LAST_HOST_UUID, host.uuid)
                 .putInt(PREF_LAST_APP_ID, app.appId)
                 .putString(PREF_LAST_APP_NAME, app.name)
+                .putLong(PREF_LAST_LAUNCH_AT, System.currentTimeMillis())
                 .apply();
         lastLaunchHost = host;
         lastLaunchApp = app;
+        updateResumeAction();
+    }
+
+    private void updateResumeAction() {
+        if (resumeButton == null) return;
+        if (isActiveStream(currentStreamStatus)) {
+            String app = currentStreamStatus.app != null && !currentStreamStatus.app.isEmpty()
+                    ? " · " + currentStreamStatus.app.toUpperCase(Locale.ROOT) : "";
+            resumeButton.setText("▶  RETURN TO STREAM" + app);
+            resumeButton.setVisibility(View.VISIBLE);
+        } else if (lastLaunchHost != null && lastLaunchApp != null) {
+            resumeButton.setText("▶  RESUME LAST · " + lastLaunchApp.name.toUpperCase(Locale.ROOT));
+            resumeButton.setVisibility(View.VISIBLE);
+        } else {
+            resumeButton.setVisibility(View.GONE);
+        }
+    }
+
+    private static boolean isActiveStream(StreamStatus status) {
+        return status != null && status.activityAlive && isActiveState(status.state);
+    }
+
+    private static boolean isActiveState(String state) {
+        return "streaming".equals(state) || "connecting".equals(state) || "reconnecting".equals(state);
+    }
+
+    private void returnToActiveStream(String packageName) {
+        if (packageName == null || packageName.isEmpty()) return;
+        Intent intent = new Intent(ACTION_RETURN_STREAM);
+        intent.setPackage(packageName);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        try {
+            startActivity(intent);
+            overridePendingTransition(0, 0);
+        } catch (RuntimeException error) {
+            Log.e(TAG, "Unable to return to active stream", error);
+            Toast.makeText(this, "The active stream is no longer available.", Toast.LENGTH_LONG).show();
+            refreshSessionStatusAsync();
+        }
+    }
+
+    private void refreshHostAvailabilityAsync() {
+        if (visibleHosts.isEmpty() || !hostProbeRunning.compareAndSet(false, true)) return;
+        lastHostProbeAt = System.currentTimeMillis();
+        List<Host> hosts = new ArrayList<>(visibleHosts);
+        executor.execute(() -> {
+            Map<String, Boolean> availability = new HashMap<>();
+            for (Host host : hosts) availability.put(host.uuid, findReadyPort(host) > 0);
+            mainHandler.post(() -> {
+                hostProbeRunning.set(false);
+                if (isFinishing() || isDestroyed()) return;
+                for (Host host : hosts) {
+                    if (!isActiveForHost(currentStreamStatus, host)) {
+                        boolean online = Boolean.TRUE.equals(availability.get(host.uuid));
+                        if (online) {
+                            setHostStatus(host, "● ONLINE · Host ready" + lastPlayedSuffix(host), 0xFF69F0AE);
+                        } else if (host.macAddress != null && !host.macAddress.isEmpty()) {
+                            setHostStatus(host, "◐ SLEEPING · Wake-on-LAN ready" + lastPlayedSuffix(host), 0xFFFFB74D);
+                        } else {
+                            setHostStatus(host, "○ OFFLINE" + lastPlayedSuffix(host), 0xFFFF8A80);
+                        }
+                    }
+                }
+                updateSessionHostStatus();
+            });
+        });
+    }
+
+    private void updateSessionHostStatus() {
+        StreamStatus status = currentStreamStatus;
+        if (!isActiveStream(status)) return;
+        for (Host host : visibleHosts) {
+            if (!isActiveForHost(status, host)) continue;
+            String app = status.app != null && !status.app.isEmpty() ? status.app : "Active app";
+            String elapsed = status.startedAt > 0 ? " · " + formatElapsed(System.currentTimeMillis() - status.startedAt) : "";
+            setHostStatus(host, "● STREAMING · " + app + " · THIS TV" + elapsed, 0xFF69F0AE);
+        }
+    }
+
+    private static boolean isActiveForHost(StreamStatus status, Host host) {
+        if (!isActiveStream(status) || host == null) return false;
+        if (status.computer != null && host.name != null && status.computer.equalsIgnoreCase(host.name)) return true;
+        return status.host != null && host.address != null && status.host.equalsIgnoreCase(host.address);
+    }
+
+    private void setHostStatus(Host host, String label, int color) {
+        TextView view = hostStatusViews.get(host.uuid);
+        if (view == null) return;
+        view.setText(label);
+        view.setTextColor(color);
+    }
+
+    private String lastPlayedSuffix(Host host) {
+        long timestamp = 0L;
+        StreamStatus status = currentStreamStatus;
+        if (status != null && !isActiveStream(status) && isSameHost(status, host)) timestamp = status.updatedAt;
+        if (timestamp <= 0 && host.uuid.equals(history().getString(PREF_LAST_HOST_UUID, null))) {
+            timestamp = history().getLong(PREF_LAST_LAUNCH_AT, 0L);
+        }
+        return timestamp > 0 ? " · Played " + formatRelative(System.currentTimeMillis() - timestamp) : "";
+    }
+
+    private static boolean isSameHost(StreamStatus status, Host host) {
+        if (status == null || host == null) return false;
+        if (status.computer != null && host.name != null && status.computer.equalsIgnoreCase(host.name)) return true;
+        return status.host != null && host.address != null && status.host.equalsIgnoreCase(host.address);
+    }
+
+    private static String formatElapsed(long milliseconds) {
+        long seconds = Math.max(0L, milliseconds / 1000L);
+        if (seconds < 60) return seconds + "s";
+        long minutes = seconds / 60;
+        if (minutes < 60) return minutes + "m";
+        return (minutes / 60) + "h " + (minutes % 60) + "m";
+    }
+
+    private static String formatRelative(long milliseconds) {
+        long minutes = Math.max(0L, milliseconds / 60_000L);
+        if (minutes < 1) return "just now";
+        if (minutes < 60) return minutes + "m ago";
+        long hours = minutes / 60;
+        if (hours < 24) return hours + "h ago";
+        return (hours / 24) + "d ago";
     }
 
     private SharedPreferences history() {
@@ -1044,6 +1207,7 @@ public final class LauncherActivity extends Activity {
     private static String compactControllerName(String name) { return name != null && name.toLowerCase(Locale.ROOT).contains("dualsense") ? "DualSense" : name != null ? name : "Controller"; }
     private static String value(Cursor cursor, String column) { int i = cursor.getColumnIndex(column); return i >= 0 && !cursor.isNull(i) ? cursor.getString(i) : null; }
     private static int integer(Cursor cursor, String column, int fallback) { int i = cursor.getColumnIndex(column); return i >= 0 && !cursor.isNull(i) ? cursor.getInt(i) : fallback; }
+    private static long longValue(Cursor cursor, String column, long fallback) { int i = cursor.getColumnIndex(column); return i >= 0 && !cursor.isNull(i) ? cursor.getLong(i) : fallback; }
 
     private static final class ControllerInfo {
         final int deviceId;
@@ -1084,7 +1248,18 @@ public final class LauncherActivity extends Activity {
         int port;
     }
     private static final class StreamApp { int appId; String name; Uri posterUri; }
-    private static final class StreamStatus { String state; String stage; String app; String computer; int bitrateKbps; }
+    private static final class StreamStatus {
+        String state;
+        String stage;
+        String host;
+        String app;
+        String computer;
+        String moonlightPackage;
+        int bitrateKbps;
+        boolean activityAlive;
+        long startedAt;
+        long updatedAt;
+    }
 
     private static class GenerativeBackdrop extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);

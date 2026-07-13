@@ -103,6 +103,16 @@ Moonlight exposes narrowly scoped integration surfaces:
   host/app identifiers and `com.limelight.extra.EXTERNAL_FRONTEND=true` to
   start a shell-owned session without leaving Moonlight's host UI underneath;
 - `com.limelight.action.OPEN_SETTINGS` for the real Moonlight settings screen.
+- `com.limelight.action.RETURN_STREAM` to reveal an existing stream without
+  relaunching its host application;
+- the stream-status provider for live session state and elapsed time.
+
+Wake & Play probes saved hosts asynchronously and labels them as online,
+Wake-on-LAN ready, or offline. While a live Moonlight activity exists, the last
+launch shortcut becomes **Return to Stream** and the matching host card shows
+the active application, client, and elapsed session time. Its fully drawn
+launcher window is system-translucent so Android TV keeps Moonlight's video
+surface alive underneath it until the user returns to the stream.
 
 The provider does not expose credentials or pairing certificates. Its signature
 permission limits access to applications signed with the same certificate. The

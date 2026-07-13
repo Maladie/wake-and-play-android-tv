@@ -2,6 +2,13 @@
     <style name="LauncherTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowFullscreen">true</item>
+        <!-- Keep an external Moonlight stream's Surface alive underneath this
+             fully-drawn launcher window, so Return to Stream can reveal the
+             existing decoder instead of starting a second session. -->
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
         <item name="android:colorAccent">#7C4DFF</item>
         <item name="android:navigationBarColor">#05060A</item>
         <item name="android:windowLightNavigationBar">false</item>
