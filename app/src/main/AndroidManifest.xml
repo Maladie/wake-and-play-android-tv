@@ -16,12 +16,15 @@
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
 
     <queries>
-        <provider android:authorities="hosts.com.limelight.debug" />
+        <provider android:authorities="hosts.com.limelight.unofficial" />
         <provider android:authorities="hosts.com.limelight" />
-        <provider android:authorities="streamstatus.com.limelight.debug" />
+        <provider android:authorities="hosts.com.limelight.debug" />
+        <provider android:authorities="streamstatus.com.limelight.unofficial" />
         <provider android:authorities="streamstatus.com.limelight" />
-        <package android:name="com.limelight.debug" />
+        <provider android:authorities="streamstatus.com.limelight.debug" />
+        <package android:name="com.limelight.unofficial" />
         <package android:name="com.limelight" />
+        <package android:name="com.limelight.debug" />
     </queries>
 
     <application

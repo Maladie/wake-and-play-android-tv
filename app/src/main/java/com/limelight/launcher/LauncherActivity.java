@@ -57,15 +57,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class LauncherActivity extends Activity {
     private static final String TAG = "WakeAndPlay";
-    private static final Uri[] HOST_URIS = {
-            Uri.parse("content://hosts.com.limelight.debug/hosts"),
-            Uri.parse("content://hosts.com.limelight/hosts")
+    private static final MoonlightTarget[] MOONLIGHT_TARGETS = {
+            new MoonlightTarget("com.limelight.unofficial"),
+            new MoonlightTarget("com.limelight"),
+            new MoonlightTarget("com.limelight.debug")
     };
-    private static final Uri[] STATUS_URIS = {
-            Uri.parse("content://streamstatus.com.limelight.debug/current"),
-            Uri.parse("content://streamstatus.com.limelight/current")
-    };
-    private static final String MOONLIGHT_PACKAGE = "com.limelight.debug";
     private static final String ACTION_STREAM = "com.limelight.action.STREAM";
     private static final String EXTRA_HOST_UUID = "com.limelight.extra.HOST_UUID";
     private static final long HOST_TIMEOUT_MS = 90_000;
@@ -182,7 +178,7 @@ public final class LauncherActivity extends Activity {
         hostParams.topMargin = dp(10);
         content.addView(hostScroll, hostParams);
 
-        emptyState = text("No saved hosts found in Moonlight Debug.", 17, 0xFFBDC4D8, false);
+        emptyState = text("No saved hosts found in a compatible Moonlight X installation.", 17, 0xFFBDC4D8, false);
         emptyState.setGravity(Gravity.CENTER);
         emptyState.setVisibility(View.GONE);
         content.addView(emptyState, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(80)));
@@ -242,7 +238,8 @@ public final class LauncherActivity extends Activity {
     }
 
     private StreamStatus loadStreamStatus() {
-        for (Uri uri : STATUS_URIS) {
+        for (MoonlightTarget target : MOONLIGHT_TARGETS) {
+            Uri uri = target.statusUri;
             try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
                 if (cursor != null && cursor.moveToFirst()) {
                     StreamStatus status = new StreamStatus();
@@ -563,26 +560,28 @@ public final class LauncherActivity extends Activity {
         if (launchCancelled.get()) return;
         slideshow.stop();
         Intent intent = new Intent(ACTION_STREAM);
-        intent.setPackage(MOONLIGHT_PACKAGE);
+        intent.setPackage(host.moonlightPackage);
         intent.putExtra(EXTRA_HOST_UUID, host.uuid);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
             overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
         } catch (Exception error) {
-            loadingMessage.setText("Moonlight Debug is not installed or does not accept the public launch intent.");
+            loadingMessage.setText("Compatible Moonlight X is not installed or does not accept the public launch intent.");
             loadingMessage.setTextColor(0xFFFF8A80);
         }
     }
 
     private List<Host> loadHosts() {
         ContentResolver resolver = getContentResolver();
-        for (Uri uri : HOST_URIS) {
+        for (MoonlightTarget target : MOONLIGHT_TARGETS) {
+            Uri uri = target.hostsUri;
             try (Cursor cursor = resolver.query(uri, null, null, null, null)) {
                 if (cursor == null) continue;
                 List<Host> hosts = new ArrayList<>();
                 while (cursor.moveToNext()) {
                     Host host = new Host();
+                    host.moonlightPackage = target.packageName;
                     host.uuid = value(cursor, "uuid");
                     host.name = value(cursor, "name");
                     String local = value(cursor, "local_address");
@@ -594,7 +593,7 @@ public final class LauncherActivity extends Activity {
                 }
                 hosts.sort(Comparator.comparing(h -> h.name.toLowerCase(Locale.ROOT)));
                 Log.i(TAG, "Loaded " + hosts.size() + " host(s) from " + uri);
-                return hosts;
+                if (!hosts.isEmpty()) return hosts;
             } catch (RuntimeException error) {
                 Log.e(TAG, "Unable to query saved hosts from " + uri, error);
             }
@@ -731,7 +730,26 @@ public final class LauncherActivity extends Activity {
 
     private enum BluetoothAction { POWER_OFF, UNPAIR }
 
-    private static final class Host { String uuid; String name; String address; String macAddress; int port; }
+    private static final class MoonlightTarget {
+        final String packageName;
+        final Uri hostsUri;
+        final Uri statusUri;
+
+        MoonlightTarget(String packageName) {
+            this.packageName = packageName;
+            hostsUri = Uri.parse("content://hosts." + packageName + "/hosts");
+            statusUri = Uri.parse("content://streamstatus." + packageName + "/current");
+        }
+    }
+
+    private static final class Host {
+        String uuid;
+        String name;
+        String address;
+        String macAddress;
+        String moonlightPackage;
+        int port;
+    }
     private static final class StreamStatus { String state; String stage; String app; String computer; int bitrateKbps; }
 
     private static class GenerativeBackdrop extends View {

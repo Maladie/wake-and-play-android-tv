@@ -41,8 +41,10 @@ Install a compatible Moonlight X build first, then the launcher:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The launcher currently hands off to the debug Moonlight package
-`com.limelight.debug`. Hosts must first be added and paired in Moonlight Debug.
+The launcher prefers the normal Moonlight X package
+`com.limelight.unofficial`. It also supports compatible builds using
+`com.limelight` and falls back to `com.limelight.debug` for development. Hosts
+must first be added and paired in the selected Moonlight installation.
 
 ## Controller actions
 
@@ -60,8 +62,8 @@ controller unchanged and offers a shortcut to the system Bluetooth settings.
 
 Moonlight exposes two narrowly scoped integration surfaces:
 
-- a read-only saved-host provider at
-  `content://hosts.com.limelight.debug/hosts`;
+- a read-only saved-host provider derived from the Moonlight package, for
+  example `content://hosts.com.limelight.unofficial/hosts`;
 - the public action `com.limelight.action.STREAM` with
   `com.limelight.extra.HOST_UUID` to open a saved host.
 
