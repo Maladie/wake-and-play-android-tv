@@ -138,6 +138,15 @@ as the channel page, above participant controls. Vertical D-pad navigation in
 long side panels is handled explicitly and scrolls the focused row into view;
 pressing Up at the first action also returns the panel viewport to the top.
 
+Focused artwork no longer stretches the small tile preview over the fullscreen
+backdrop or crossfades/scales two resolutions of the same hero image. The tile
+preview appears immediately in the stable FIT_CENTER hero geometry; only the
+separately decoded blurred backdrop crossfades asynchronously.
+
+Back and controller B on the Wake & Play home screen open a confirmation panel
+instead of finishing the Activity. Closing Wake & Play explicitly does not send
+any stop/quit command to the active host session.
+
 The host installation at `C:\Tools\WakePlayGateway` was upgraded in place to
 the profile-aware Gateway while preserving `gateway.json`, its certificate and
 paired clients. Authenticated verification returned the `default` profile with

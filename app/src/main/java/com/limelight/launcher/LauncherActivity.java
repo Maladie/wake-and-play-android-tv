@@ -349,8 +349,22 @@ public final class LauncherActivity extends Activity {
             launchCancelled.set(true);
             showHome();
         } else {
-            super.onBackPressed();
+            showExitConfirmationPanel();
         }
+    }
+
+    private void showExitConfirmationPanel() {
+        TextView cancel = panelAction("CANCEL");
+        TextView exit = discordAction("EXIT WAKE & PLAY", DISCORD_RED);
+        Runnable dismiss = () -> hideSidePanel(true);
+        cancel.setOnClickListener(v -> dismiss.run());
+        exit.setOnClickListener(v -> {
+            hideSidePanel(false);
+            finishAndRemoveTask();
+        });
+        showSidePanel("WAKE & PLAY", "Close Wake & Play?",
+                "The active host session will not be stopped.",
+                dismiss, panelActionRow(cancel, exit));
     }
 
     private void restoreExternalActivityFocus() {
@@ -395,9 +409,8 @@ public final class LauncherActivity extends Activity {
                         event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B) {
                     playUiSound(AudioManager.FX_FOCUS_NAVIGATION_DOWN, 0.3f);
                 }
-                if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B &&
-                        ((modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) ||
-                                (loadingLayer != null && loadingLayer.getVisibility() == View.VISIBLE))) {
+                if (event.getKeyCode() == KeyEvent.KEYCODE_BACK ||
+                        event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B) {
                     onBackPressed();
                     return true;
                 }
@@ -675,6 +688,11 @@ public final class LauncherActivity extends Activity {
 
         loadingLayer = new FrameLayout(this);
         loadingLayer.setVisibility(View.GONE);
+        // Keep the complete hand-off screen in one opaque compositor layer.
+        // Without this, the task switch can preserve only the independently
+        // invalidated loading message and briefly drop the title/background.
+        loadingLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        loadingLayer.setClickable(true);
         slideshow = new GenerativeSlideshow(this);
         loadingLayer.addView(slideshow, match());
         View shade = new View(this);
@@ -1277,7 +1295,9 @@ public final class LauncherActivity extends Activity {
 
     private void showArtworkPreview(int request, Drawable source) {
         if (source == null || request != backdropRequest.get()) return;
-        setArtworkPreview(artworkBackdrop, cloneDrawable(source), 0.22f);
+        // The tile drawable is an immediate preview for the hero only. Stretching
+        // the small poster over the whole screen made it look blurred, then the
+        // later blurred backdrop replacement appeared as a second layout jump.
         setArtworkPreview(artworkHero, cloneDrawable(source), 0.58f);
         artworkScrim.animate().cancel();
         artworkScrim.animate().alpha(1f).setDuration(180).start();
@@ -1417,19 +1437,16 @@ public final class LauncherActivity extends Activity {
                 oldBackdropDrawable,
                 new BitmapDrawable(getResources(), currentBackdropBitmap)});
         backdropTransition.setCrossFadeEnabled(true);
-        TransitionDrawable heroTransition = new TransitionDrawable(new android.graphics.drawable.Drawable[]{
-                oldHeroDrawable,
-                new BitmapDrawable(getResources(), currentHeroBitmap)});
-        heroTransition.setCrossFadeEnabled(true);
         artworkBackdrop.setImageDrawable(backdropTransition);
-        artworkHero.setImageDrawable(heroTransition);
+        // Preview and final hero represent the same poster. Crossfading the two
+        // resolutions produces a briefly doubled/soft image, so replace it in
+        // the existing FIT_CENTER geometry without applying a scale animation.
+        artworkHero.setImageBitmap(currentHeroBitmap);
         artworkBackdrop.setAlpha(0.28f);
         artworkHero.setAlpha(0.58f);
-        artworkHero.setScaleX(1.025f);
-        artworkHero.setScaleY(1.025f);
+        artworkHero.setScaleX(1f);
+        artworkHero.setScaleY(1f);
         backdropTransition.startTransition(420);
-        heroTransition.startTransition(420);
-        artworkHero.animate().scaleX(1f).scaleY(1f).setDuration(460).start();
         artworkScrim.animate().alpha(1f).setDuration(260).start();
         mainHandler.postDelayed(() -> {
             if (request != backdropRequest.get() || isFinishing() || isDestroyed()) return;
