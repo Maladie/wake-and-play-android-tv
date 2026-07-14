@@ -1,6 +1,7 @@
 package com.limelight.launcher;
 
 import android.app.Activity;
+import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.Manifest;
 import android.content.ContentResolver;
@@ -18,8 +19,10 @@ import android.graphics.PixelFormat;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.TransitionDrawable;
 import android.hardware.BatteryState;
+import android.hardware.input.InputManager;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -90,6 +93,7 @@ public final class LauncherActivity extends Activity {
     private static final String EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH = "com.limelight.extra.EXTERNAL_FRONTEND_ANIMATION_EPOCH";
     private static final String EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION = "com.limelight.extra.EXTERNAL_FRONTEND_REDUCED_MOTION";
     private static final long HOST_TIMEOUT_MS = 90_000;
+    private static final long CONTROLLER_BATTERY_REFRESH_MS = 60_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
     private static final String HISTORY_PREFS = "launch_history";
     private static final String PREF_LAST_HOST_UUID = "last_host_uuid";
@@ -101,6 +105,23 @@ public final class LauncherActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final InputManager.InputDeviceListener controllerDeviceListener =
+            new InputManager.InputDeviceListener() {
+                @Override
+                public void onInputDeviceAdded(int deviceId) {
+                    scheduleControllerRefresh();
+                }
+
+                @Override
+                public void onInputDeviceRemoved(int deviceId) {
+                    scheduleControllerRefresh();
+                }
+
+                @Override
+                public void onInputDeviceChanged(int deviceId) {
+                    scheduleControllerRefresh();
+                }
+            };
     private final AtomicBoolean launchCancelled = new AtomicBoolean(false);
     private final AtomicBoolean hostProbeRunning = new AtomicBoolean(false);
     private final AtomicInteger backdropRequest = new AtomicInteger();
@@ -112,6 +133,9 @@ public final class LauncherActivity extends Activity {
     private boolean userNavigationStarted;
     private long initialFocusDeadline;
     private boolean sessionStatusLoaded;
+    private boolean dashboardActive;
+    private boolean controllerListenerRegistered;
+    private InputManager inputManager;
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
     private LinearLayout appRow;
@@ -189,6 +213,7 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        inputManager = (InputManager) getSystemService(INPUT_SERVICE);
         uiSoundsEnabled = history().getBoolean(PREF_UI_SOUNDS, true);
         reducedMotion = history().getBoolean(PREF_REDUCED_MOTION, false);
         // Always submit a complete opaque frame. Sony's compositor otherwise
@@ -201,6 +226,11 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        dashboardActive = true;
+        if (inputManager != null && !controllerListenerRegistered) {
+            inputManager.registerInputDeviceListener(controllerDeviceListener, mainHandler);
+            controllerListenerRegistered = true;
+        }
         launchCancelled.set(false);
         if (homeLayer != null) {
             userNavigationStarted = false;
@@ -228,6 +258,11 @@ public final class LauncherActivity extends Activity {
 
     @Override
     protected void onPause() {
+        dashboardActive = false;
+        if (inputManager != null && controllerListenerRegistered) {
+            inputManager.unregisterInputDeviceListener(controllerDeviceListener);
+            controllerListenerRegistered = false;
+        }
         super.onPause();
         if (controllerScroll != null) controllerScrollPosition = controllerScroll.getScrollX();
         if (hostScroll != null) hostScrollPosition = hostScroll.getScrollX();
@@ -363,7 +398,7 @@ public final class LauncherActivity extends Activity {
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(64), dp(26), dp(64), dp(38));
+        content.setPadding(dp(64), dp(26), dp(64), dp(8));
         content.setClipChildren(false);
         content.setClipToPadding(false);
         homeLayer.addView(content, match());
@@ -498,7 +533,11 @@ public final class LauncherActivity extends Activity {
         appScroll.setPadding(0, 0, dp(12), dp(10));
         appRow = horizontalRow();
         appScroll.addView(appRow);
-        LinearLayout.LayoutParams appParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        // Keep the complete 2:3 artwork visible even when the controller row is
+        // present. A weighted remainder shrank this viewport below the tile's
+        // required height and clipped posters at the top and bottom.
+        LinearLayout.LayoutParams appParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(120));
         appParams.topMargin = dp(5);
         content.addView(appScroll, appParams);
 
@@ -639,15 +678,25 @@ public final class LauncherActivity extends Activity {
     }
 
     private void refreshControllersAsync() {
+        if (!dashboardActive) return;
         executor.execute(() -> {
             List<ControllerInfo> controllers = loadControllers();
             mainHandler.post(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (!dashboardActive || isFinishing() || isDestroyed()) return;
                 renderControllers(controllers);
-                mainHandler.postDelayed(this::refreshControllersAsync, 5_000);
+                mainHandler.postDelayed(controllerRefreshRunnable,
+                        CONTROLLER_BATTERY_REFRESH_MS);
             });
         });
     }
+
+    private void scheduleControllerRefresh() {
+        if (!dashboardActive) return;
+        mainHandler.removeCallbacks(controllerRefreshRunnable);
+        mainHandler.postDelayed(controllerRefreshRunnable, 150);
+    }
+
+    private final Runnable controllerRefreshRunnable = this::refreshControllersAsync;
 
     private List<ControllerInfo> loadControllers() {
         List<InputDevice> devices = new ArrayList<>();
@@ -857,8 +906,15 @@ public final class LauncherActivity extends Activity {
             if (selectedHostCard == null) {
                 selectedHostCard = hostRow.getChildAt(0);
                 styleHostCard(selectedHostCard, false, true);
-                selectHost(hosts.get(0), false);
+                selectedHost = hosts.get(0);
             }
+            // onPause() removes pending UI callbacks so a provider result cannot
+            // redraw this Activity while Moonlight is covering it. If that happens
+            // before the app list callback runs, the selected host is still kept
+            // but its temporary loading row would otherwise survive every resume.
+            // Always issue a fresh app query for the selected host when rebuilding
+            // the dashboard.
+            selectHost(selectedHost, false);
         } else {
             selectedHost = null;
             renderApps(null, Collections.emptyList());
@@ -993,7 +1049,7 @@ public final class LauncherActivity extends Activity {
             }
             if (focused) {
                 noteTileFocus(card, true);
-                showArtworkBackdrop(app.posterUri);
+                showArtworkBackdrop(app.posterUri, poster);
             }
         });
         return card;
@@ -1040,18 +1096,47 @@ public final class LauncherActivity extends Activity {
         }
     }
 
-    private void showArtworkBackdrop(Uri uri) {
+    private void showArtworkBackdrop(Uri uri, ImageView poster) {
         if (uri == null || artworkBackdrop == null) {
             clearArtworkBackdrop();
             return;
         }
         int request = backdropRequest.incrementAndGet();
-        // Wait until focus settles. Rapid D-pad navigation should not flash a
-        // different full-screen background for every tile crossed.
+        showArtworkPreview(request, poster != null ? poster.getDrawable() : null);
+        // Ignore only extremely short focus fly-overs. The visible preview above
+        // starts immediately, while the blurred layer is prepared off the UI thread.
         mainHandler.postDelayed(() -> {
             if (request != backdropRequest.get() || isFinishing() || isDestroyed()) return;
             executor.execute(() -> loadArtworkBackdrop(request, uri));
-        }, 280);
+        }, 35);
+    }
+
+    private void showArtworkPreview(int request, Drawable source) {
+        if (source == null || request != backdropRequest.get()) return;
+        setArtworkPreview(artworkBackdrop, cloneDrawable(source), 0.22f);
+        setArtworkPreview(artworkHero, cloneDrawable(source), 0.58f);
+        artworkScrim.animate().cancel();
+        artworkScrim.animate().alpha(1f).setDuration(180).start();
+    }
+
+    private void setArtworkPreview(ImageView target, Drawable next, float alpha) {
+        if (next == null) return;
+        target.animate().cancel();
+        Drawable current = target.getDrawable();
+        if (current == null || reducedMotion) {
+            target.setImageDrawable(next);
+        } else {
+            TransitionDrawable transition = new TransitionDrawable(new Drawable[]{current, next});
+            transition.setCrossFadeEnabled(true);
+            target.setImageDrawable(transition);
+            transition.startTransition(180);
+        }
+        target.setAlpha(alpha);
+    }
+
+    private Drawable cloneDrawable(Drawable drawable) {
+        Drawable.ConstantState state = drawable != null ? drawable.getConstantState() : null;
+        return state != null ? state.newDrawable(getResources()).mutate() : drawable;
     }
 
     private void loadArtworkBackdrop(int request, Uri uri) {
@@ -1082,6 +1167,8 @@ public final class LauncherActivity extends Activity {
         artworkHero.animate().cancel();
         artworkScrim.animate().cancel();
 
+        Drawable oldBackdropDrawable = artworkBackdrop.getDrawable();
+        Drawable oldHeroDrawable = artworkHero.getDrawable();
         Bitmap oldBackdrop = currentBackdropBitmap;
         Bitmap oldHero = currentHeroBitmap;
         currentBackdropBitmap = result.backdrop;
@@ -1092,7 +1179,7 @@ public final class LauncherActivity extends Activity {
         glassAccentColor = sampleArtworkAccent(result.hero);
         refreshGlassStyles();
 
-        if (oldBackdrop == null || oldHero == null || reducedMotion) {
+        if (oldBackdropDrawable == null || oldHeroDrawable == null || reducedMotion) {
             artworkBackdrop.setImageBitmap(currentBackdropBitmap);
             artworkHero.setImageBitmap(currentHeroBitmap);
             artworkBackdrop.setAlpha(0.28f);
@@ -1105,11 +1192,11 @@ public final class LauncherActivity extends Activity {
         }
 
         TransitionDrawable backdropTransition = new TransitionDrawable(new android.graphics.drawable.Drawable[]{
-                new BitmapDrawable(getResources(), oldBackdrop),
+                oldBackdropDrawable,
                 new BitmapDrawable(getResources(), currentBackdropBitmap)});
         backdropTransition.setCrossFadeEnabled(true);
         TransitionDrawable heroTransition = new TransitionDrawable(new android.graphics.drawable.Drawable[]{
-                new BitmapDrawable(getResources(), oldHero),
+                oldHeroDrawable,
                 new BitmapDrawable(getResources(), currentHeroBitmap)});
         heroTransition.setCrossFadeEnabled(true);
         artworkBackdrop.setImageDrawable(backdropTransition);
@@ -1314,9 +1401,11 @@ public final class LauncherActivity extends Activity {
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_MESSAGE, loadingMessage.getText().toString());
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH, slideshow.getStartedAt());
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION, reducedMotion);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+                Intent.FLAG_ACTIVITY_CLEAR_TOP |
+                Intent.FLAG_ACTIVITY_NO_ANIMATION);
         try {
-            startActivity(intent);
+            startActivity(intent, ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle());
             rememberLastLaunch(host, app);
             // Moonlight X takes over with a matching loader. Avoid exposing an
             // intermediate frame or cross-fading the two loading surfaces.
@@ -1505,9 +1594,15 @@ public final class LauncherActivity extends Activity {
         if (packageName == null || packageName.isEmpty()) return;
         Intent intent = new Intent(ACTION_RETURN_STREAM);
         intent.setPackage(packageName);
+        // A surviving Moonlight transport may recreate its Activity without the
+        // original launch extras (for example after a package update). Re-attach
+        // the frontend contract on every return so BACK still hands control to
+        // Wake & Play instead of finishing the stream.
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND, true);
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND_PACKAGE, getPackageName());
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
-            startActivity(intent);
+            startActivity(intent, ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle());
             overridePendingTransition(0, 0);
         } catch (RuntimeException error) {
             Log.e(TAG, "Unable to return to active stream", error);
@@ -2014,7 +2109,12 @@ public final class LauncherActivity extends Activity {
         background.setCornerRadius(dp(10));
         background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFE9E3FF : 0x387C89B2);
         button.setBackground(background);
-        animateFocusScale(button, focused ? 1.008f : 1f, 110);
+        // Compact actions already use a stronger stroke for focus. Scaling a
+        // MATCH_PARENT panel action makes its background extend outside the
+        // layout slot and appear to escape the surrounding frame.
+        button.animate().cancel();
+        button.setScaleX(1f);
+        button.setScaleY(1f);
     }
 
     private void animateFocusScale(View view, float scale, long duration) {
