@@ -133,6 +133,11 @@ Discord child page loads. Re-rendering an already open panel does not replay
 the slide-in animation and restores focus/scroll when the focused action still
 exists, preventing the visible layout and focus jump seen on TV.
 
+The Discord People page exposes the same local Mute/Unmute and Leave actions
+as the channel page, above participant controls. Vertical D-pad navigation in
+long side panels is handled explicitly and scrolls the focused row into view;
+pressing Up at the first action also returns the panel viewport to the top.
+
 The host installation at `C:\Tools\WakePlayGateway` was upgraded in place to
 the profile-aware Gateway while preserving `gateway.json`, its certificate and
 paired clients. Authenticated verification returned the `default` profile with

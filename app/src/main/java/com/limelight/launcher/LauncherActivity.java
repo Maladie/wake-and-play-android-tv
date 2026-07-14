@@ -16,6 +16,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.BitmapDrawable;
@@ -378,6 +379,15 @@ public final class LauncherActivity extends Activity {
             // arrives, their choice wins over the delayed default Resume focus.
             userNavigationStarted = true;
             initialFocusPending = false;
+            if (modalLayer != null && modalLayer.getVisibility() == View.VISIBLE &&
+                    (event.getKeyCode() == KeyEvent.KEYCODE_DPAD_UP ||
+                            event.getKeyCode() == KeyEvent.KEYCODE_DPAD_DOWN) &&
+                    moveSidePanelFocusVertically(event.getKeyCode())) {
+                playUiSound(event.getKeyCode() == KeyEvent.KEYCODE_DPAD_UP
+                        ? AudioManager.FX_FOCUS_NAVIGATION_UP
+                        : AudioManager.FX_FOCUS_NAVIGATION_DOWN, 0.28f);
+                return true;
+            }
             if (event.getRepeatCount() == 0) {
                 if (isConfirmKey(event.getKeyCode())) {
                     playUiSound(AudioManager.FX_KEY_CLICK, 0.42f);
@@ -394,6 +404,44 @@ public final class LauncherActivity extends Activity {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    private boolean moveSidePanelFocusVertically(int keyCode) {
+        View focused = getCurrentFocus();
+        if (focused == null || !isDescendantOf(focused, sidePanel)) return false;
+        List<List<View>> rows = sidePanelFocusRows();
+        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            List<View> row = rows.get(rowIndex);
+            int column = row.indexOf(focused);
+            if (column < 0) continue;
+            int targetRow = keyCode == KeyEvent.KEYCODE_DPAD_UP
+                    ? rowIndex - 1 : rowIndex + 1;
+            if (targetRow < 0) {
+                sidePanelScroll.smoothScrollTo(0, 0);
+                return true;
+            }
+            if (targetRow >= rows.size()) {
+                sidePanelScroll.fullScroll(View.FOCUS_DOWN);
+                return true;
+            }
+            List<View> destinationRow = rows.get(targetRow);
+            View target = destinationRow.get(Math.min(column, destinationRow.size() - 1));
+            target.requestFocus();
+            Rect targetRect = new Rect();
+            target.getDrawingRect(targetRect);
+            sidePanel.offsetDescendantRectToMyCoords(target, targetRect);
+            int viewportTop = sidePanelScroll.getScrollY() + dp(72);
+            int viewportBottom = sidePanelScroll.getScrollY() +
+                    sidePanelScroll.getHeight() - dp(72);
+            if (targetRect.top < viewportTop) {
+                sidePanelScroll.smoothScrollTo(0, Math.max(0, targetRect.top - dp(72)));
+            } else if (targetRect.bottom > viewportBottom) {
+                sidePanelScroll.smoothScrollTo(0,
+                        targetRect.bottom - sidePanelScroll.getHeight() + dp(72));
+            }
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -2931,12 +2979,35 @@ public final class LauncherActivity extends Activity {
                 mainHandler.post(() -> {
                     if (!isCurrentIntegrationPanel(request, host.uuid)) return;
                     List<View> views = new ArrayList<>();
+                    TextView[] voiceActions = new TextView[2];
                     if (!current.connected) {
                         views.add(panelStatus("Discord is not connected to a voice channel."));
                     } else {
                         views.add(panelStatus("◉  " + current.channelName + "  ·  " +
                                 current.participants + " participant" +
                                 (current.participants == 1 ? "" : "s")));
+                        TextView voiceMute = discordAction(
+                                current.muted ? "MIC MUTED  ·  UNMUTE" : "MIC ON  ·  MUTE",
+                                current.muted ? DISCORD_RED : DISCORD_GREEN);
+                        TextView voiceLeave = discordAction("LEAVE", DISCORD_RED);
+                        voiceMute.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Toggling microphone…",
+                                    "Microphone updated.",
+                                    () -> showDiscordParticipantsPanel(host, connection, true),
+                                    () -> hostGatewayClient.setDiscordVoiceFlag(
+                                            connection, "mute", "toggle"));
+                        });
+                        voiceLeave.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Leaving voice…",
+                                    "Voice disconnected.",
+                                    () -> showDiscordParticipantsPanel(host, connection, true),
+                                    () -> hostGatewayClient.leaveDiscordChannel(connection));
+                        });
+                        voiceActions[0] = voiceMute;
+                        voiceActions[1] = voiceLeave;
+                        views.add(panelActionRow(voiceMute, voiceLeave));
                         for (HostGatewayClient.DiscordParticipant participant :
                                 current.participantList) {
                             TextView person = panelStatus("");
@@ -2998,7 +3069,8 @@ public final class LauncherActivity extends Activity {
                     showSidePanel("DISCORD", "People", null,
                             () -> showDiscordPanel(host, connection),
                             views.toArray(new View[0]));
-                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                    activateDiscordControllerShortcuts(host, connection, null,
+                            voiceActions[0], voiceActions[1]);
                     updateDiscordShortcutVoice(current);
                 });
             } catch (IOException error) {
