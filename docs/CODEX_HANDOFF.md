@@ -120,6 +120,66 @@ The latest verified session used Steam Big Picture. Remote Back returned to Wake
 
 Do not use the `Sleep PC` entry for automated or manual stream testing. Use `Baba Is You` or `Steam Big Picture` only.
 
+## Approved next task: Playnite console shell
+
+No Playnite code has been implemented yet. The agreed direction is to make
+Playnite Fullscreen the profile-scoped console shell behind Wake & Play while
+preserving direct launch from an individual Wake & Play tile.
+
+The intended direct-launch flow is:
+
+1. The user selects a game tile such as `Baba Is You` in Wake & Play.
+2. Wake & Play starts or resumes one persistent Vibepollo/Apollo application,
+   provisionally named `Wake & Play Console`, rather than making the lifetime of
+   the stream depend on the selected game's process.
+3. Moonlight connects but keeps its opaque native loading surface visible.
+4. A profile-scoped Playnite/Console Bridge starts Playnite Fullscreen and asks
+   Playnite to launch the selected game by its Playnite library GUID.
+5. The Bridge reports that the target game window is visible, foreground,
+   correctly sized on the streamed display and stable for several samples.
+6. Moonlight removes the loading surface. The user sees the game directly, not
+   the Windows desktop and normally not Playnite itself.
+7. When the game exits, the stream remains connected. The loading/privacy
+   surface may briefly cover the transition until Playnite Fullscreen is again
+   foreground and stable, then Playnite is revealed.
+
+Architecture constraints agreed for this work:
+
+- Keep one authenticated Gateway per physical host. GUI automation and Playnite
+  state must live in a Bridge running in the selected interactive Windows
+  profile, following the existing profile registry design.
+- Do not run interactive Playnite/Steam processes directly from the host-wide
+  Gateway service.
+- Treat `first video frame rendered` as necessary but not sufficient to reveal
+  the stream. Moonlight must also receive a launcher/game readiness signal, with
+  a bounded timeout and explicit retry/reveal/cancel recovery UI.
+- A process existing is not a sufficient readiness signal. Validate a visible,
+  non-cloaked foreground window on the Apollo streamed display, final client
+  geometry and stability over consecutive samples.
+- Add `Return to Playnite` as a non-destructive session action in Wake & Play
+  and Moonlight's overlay. It must never reuse `QUIT_STREAM_APP`, because that
+  action deliberately ends both the host application and transport.
+- Normal game exit should use Playnite's game lifecycle events and return to
+  Fullscreen automatically. A requested `Close game and return` should first use
+  graceful window close/Alt+F4 and wait for Playnite's stopped event; forced
+  process termination must not be the default.
+- Keep an explicit Playnite tile for opening the launcher without a game and an
+  explicit Desktop tile as the only intentional route to the Windows desktop.
+- Store launcher choice and Playnite game mappings per host and integration
+  profile. Multiple Windows profiles can have different Playnite libraries.
+- Discover the installed Playnite path, version, user-data directory, current
+  Vibepollo application configuration and streamed-display behavior before
+  choosing installer or migration details. Do not assume the default paths.
+- Steam Big Picture can later implement the same shell contract, but Playnite is
+  the first implementation and should not be weakened to Steam's more heuristic
+  lifecycle detection.
+
+The current Wake & Play catalog is still read from Moonlight/Vibepollo cached
+applications. A first implementation may add explicit Playnite GUID mappings,
+but the desired end state is for the profile Bridge to expose the Playnite
+library and artwork so Wake & Play tiles can launch through the persistent
+console session.
+
 The Discord UI was additionally verified on the TV without launching a new
 Moonlight stream: server-to-channel-to-detail navigation, Join changing to
 Leave, Back returning to the channel list without disconnecting, and explicit
