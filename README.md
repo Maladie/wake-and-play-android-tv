@@ -146,3 +146,11 @@ permission limits access to applications signed with the same certificate. The
 permission name follows the Moonlight package ID, for example
 `com.limelight.unofficial.permission.READ_SAVED_HOSTS` for the normal Moonlight
 X release.
+
+## Host services
+
+The repository also contains the complete Windows host integration package in
+`host-services/`: the authenticated HTTPS Gateway plus the loopback-only
+Discord and Vibepollo Bridges. Runtime secrets, DPAPI data, certificates, logs
+and per-profile state are intentionally excluded. See
+`host-services/README.md` for installation and profile-routing details.

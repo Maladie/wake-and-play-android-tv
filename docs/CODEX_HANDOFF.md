@@ -70,9 +70,11 @@ Updated: 2026-07-14
 
 ## Host Gateway
 
-The versioned gateway implementation lives under `host-gateway/`. It keeps the
-existing Discord and Vibepollo bridges on loopback and exposes only an
-allow-listed HTTPS API to paired Android TV clients.
+The complete versioned host package lives under `host-services/`. It includes
+the Gateway and canonical Discord/Vibepollo Bridge sources. The Bridges remain
+on loopback and the Gateway exposes only an allow-listed HTTPS API to paired
+Android TV clients. Runtime configuration, DPAPI secrets, certificates, logs,
+diagnostics and state are excluded from Git.
 
 Use one Gateway per physical streaming host. Discord Bridge is session-bound:
 run one Bridge instance for each Windows/Discord profile because DPAPI secrets
@@ -81,18 +83,18 @@ only one concurrently running Discord client can own `discord-ipc-0` and the
 local RPC WebSocket port. With fast user switching, fully exit Discord in the
 previous Windows profile before starting it in another profile. The Bridge and
 Gateway now preserve this conflict as a specific error instead of reporting a
-generic missing pipe. The planned
-Gateway profile registry maps stable profile IDs to loopback Bridge endpoints;
-Wake & Play state is keyed by `(hostUuid, integrationProfileId)`. Vibepollo
-also needs a per-profile Bridge whenever its locally protected API credentials
-or runtime are profile-specific.
+generic missing pipe. The Gateway profile registry maps stable profile IDs to
+loopback Bridge endpoints. Requests without `X-WakePlay-Profile` use the
+backward-compatible `default` profile. Wake & Play state is keyed by
+`(hostUuid, integrationProfileId)`. Vibepollo also needs a per-profile Bridge
+whenever its locally protected API credentials or runtime are profile-specific.
 
 The current single-Bridge configuration is treated as Discord profile
 `default`. This preserves existing pairing and Bridge configuration while the
-profile selector and Gateway profile registry are added later. Do not create a
-separate Gateway per Windows profile.
+Android profile selector is added later. Do not create a separate Gateway per
+Windows profile.
 
-Run `host-gateway/Start-WakePlayGateway.ps1` on the streaming PC and enter the
+Run `host-services/gateway/Start-WakePlayGateway.ps1` on the streaming PC and enter the
 displayed six-digit code under `Options > Host integrations` in Wake & Play.
 Pairing is valid for ten minutes. Do not expose the gateway port to the
 Internet.
@@ -130,8 +132,8 @@ The debug APK is produced under `app/build/outputs/apk/debug/`.
   VirtualHere controls are implemented in Wake & Play. Quick Discord controls
   in the Moonlight overlay are implemented on the companion branch, but still
   require an authorized live-stream UI test.
-- A multi-profile Gateway registry and profile selector are not implemented
-  yet; only the profile-aware Android preference key and `default` migration
-  foundation exist.
+- The multi-profile Gateway registry and per-profile host installers are
+  implemented. The Android profile selector is not implemented yet, so current
+  requests still resolve to `default`.
 - When tuning artwork transitions, keep the cached immediate preview and update the blurred background asynchronously.
 - Validate changes together with the matching Moonlight branch because the active-session contract spans both applications.

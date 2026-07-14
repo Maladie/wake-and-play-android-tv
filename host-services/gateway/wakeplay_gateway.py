@@ -28,6 +28,7 @@ MAX_BODY_BYTES = 16 * 1024
 DISCORD_ID_PATTERN = re.compile(r"^[0-9]{5,32}$")
 VIRTUALHERE_ADDRESS_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 AUDIO_DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:{}-]{1,220}$")
+PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def compact_json(value: Any) -> bytes:
@@ -47,12 +48,18 @@ class GatewayState:
         self.config.setdefault("listen_port", 8785)
         self.config.setdefault("discord_bridge", "http://127.0.0.1:8765")
         self.config.setdefault("vibepollo_bridge", "http://127.0.0.1:8775")
+        self.config.setdefault("profiles", {})
+        self.config["profiles"].setdefault("default", {
+            "discord_bridge": self.config["discord_bridge"],
+            "vibepollo_bridge": self.config["vibepollo_bridge"],
+        })
         self.config.setdefault("clients", [])
         self.pairing_code_hash = sha256_text(pairing_code) if pairing_code else None
         self.pairing_expires_at = time.monotonic() + PAIRING_LIFETIME_SECONDS if pairing_code else 0.0
         self.failed_pair_attempts: dict[str, list[float]] = {}
         self.idempotent_results: dict[str, tuple[float, int, Any]] = {}
         self.lock = threading.RLock()
+        self.request_context = threading.local()
 
     @property
     def base_dir(self) -> Path:
@@ -106,15 +113,32 @@ class GatewayState:
             self.save()
         return {"client_id": client_id, "token": token}
 
+    def select_profile(self, profile_id: str | None) -> str:
+        selected = str(profile_id or "default").strip() or "default"
+        if not PROFILE_ID_PATTERN.fullmatch(selected):
+            raise ValueError("Invalid integration profile ID.")
+        profiles = self.config.get("profiles", {})
+        if selected not in profiles:
+            raise ValueError(f"Unknown integration profile: {selected}")
+        self.request_context.profile_id = selected
+        return selected
+
+    @property
+    def profile_id(self) -> str:
+        return str(getattr(self.request_context, "profile_id", "default"))
+
     def bridge_url(self, name: str, path: str) -> str:
-        base = str(self.config[f"{name}_bridge"]).rstrip("/")
+        profile = self.config.get("profiles", {}).get(self.profile_id, {})
+        base = str(profile.get(f"{name}_bridge", "")).rstrip("/")
+        if not base and self.profile_id == "default":
+            base = str(self.config[f"{name}_bridge"]).rstrip("/")
         if not base.startswith("http://127.0.0.1:") and not base.startswith("http://localhost:"):
             raise ValueError(f"{name} bridge must remain on loopback")
         return base + path
 
     def proxy(self, name: str, path: str, timeout: float = 2.5) -> tuple[bool, Any]:
-        request = urllib.request.Request(self.bridge_url(name, path), method="GET")
         try:
+            request = urllib.request.Request(self.bridge_url(name, path), method="GET")
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read(1024 * 1024).decode("utf-8", errors="replace")
                 content_type = response.headers.get_content_type()
@@ -124,7 +148,8 @@ class GatewayState:
         except urllib.error.HTTPError as error:
             raw = error.read(64 * 1024).decode("utf-8", errors="replace").strip()
             return False, {"error": raw or str(error), "status": error.code}
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+                json.JSONDecodeError) as error:
             return False, {"error": str(error)}
 
     def capabilities(self) -> dict[str, Any]:
@@ -135,7 +160,11 @@ class GatewayState:
             virtualhere_ok, virtualhere = self.proxy(
                 "discord", "/virtualhere-state", timeout=1.5)
         return {
-            "gateway": {"online": True, "api_version": 1},
+            "gateway": {
+                "online": True,
+                "api_version": 1,
+                "integration_profile_id": self.profile_id,
+            },
             "capabilities": {
                 "vibepollo_fix": {"available": vibepollo_ok, "health": vibepollo},
                 "discord": {"available": discord_ok, "health": discord},
@@ -443,6 +472,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Authentication required."})
         return False
 
+    def select_profile(self) -> str:
+        return self.state.select_profile(self.headers.get("X-WakePlay-Profile", "default"))
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._do_GET()
@@ -460,6 +492,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
         if not self.require_auth():
             return
+        self.select_profile()
         if path == f"{API_PREFIX}/capabilities":
             self.send_json(HTTPStatus.OK, self.state.capabilities())
         elif path == f"{API_PREFIX}/vibepollo/repair/status":
@@ -497,6 +530,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             if not self.require_auth():
                 return
+            profile_id = self.select_profile()
             prefix = f"{API_PREFIX}/vibepollo/repair/"
             if path.startswith(prefix):
                 action = path[len(prefix):]
@@ -504,7 +538,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if not request_id or len(request_id) > 128:
                     self.send_json(HTTPStatus.BAD_REQUEST, {"error": "A valid X-Request-Id header is required."})
                     return
-                status, result = self.state.idempotent(request_id, lambda: self.state.vibepollo_action(action))
+                status, result = self.state.idempotent(
+                    f"{profile_id}:{request_id}", lambda: self.state.vibepollo_action(action))
                 self.send_json(status, result)
                 return
             discord_prefix = f"{API_PREFIX}/discord/"
@@ -518,7 +553,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 operation = (lambda: self.state.audio_action(action[6:], body)) \
                     if action.startswith("audio/") else \
                     (lambda: self.state.discord_action(action, body))
-                status, result = self.state.idempotent(request_id, operation)
+                status, result = self.state.idempotent(f"{profile_id}:{request_id}", operation)
                 self.send_json(status, result)
                 return
             virtualhere_prefix = f"{API_PREFIX}/virtualhere/"
@@ -530,7 +565,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     return
                 body = self.read_json()
                 status, result = self.state.idempotent(
-                    request_id, lambda: self.state.virtualhere_action(action, body))
+                    f"{profile_id}:{request_id}",
+                    lambda: self.state.virtualhere_action(action, body))
                 self.send_json(status, result)
                 return
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})

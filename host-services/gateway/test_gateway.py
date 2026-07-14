@@ -34,9 +34,30 @@ class GatewayStateTest(unittest.TestCase):
 
     def test_bridge_url_must_remain_on_loopback(self):
         state = GatewayState(self.config_path, None)
-        state.config["vibepollo_bridge"] = "http://192.0.2.2:8775"
+        state.config["profiles"]["default"]["vibepollo_bridge"] = "http://192.0.2.2:8775"
         with self.assertRaises(ValueError):
             state.bridge_url("vibepollo", "/health")
+
+    def test_profile_selects_its_own_loopback_bridges(self):
+        state = GatewayState(self.config_path, None)
+        state.config["profiles"]["basia"] = {
+            "discord_bridge": "http://127.0.0.1:8865",
+            "vibepollo_bridge": "http://localhost:8875",
+        }
+
+        self.assertEqual("basia", state.select_profile("basia"))
+        self.assertEqual(
+            "http://127.0.0.1:8865/health",
+            state.bridge_url("discord", "/health"),
+        )
+        self.assertEqual("basia", state.capabilities()["gateway"]["integration_profile_id"])
+
+    def test_unknown_or_invalid_profile_is_rejected(self):
+        state = GatewayState(self.config_path, None)
+        with self.assertRaises(ValueError):
+            state.select_profile("missing")
+        with self.assertRaises(ValueError):
+            state.select_profile("../default")
 
     def test_idempotent_action_runs_once(self):
         state = GatewayState(self.config_path, None)

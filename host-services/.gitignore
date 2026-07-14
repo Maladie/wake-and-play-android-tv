@@ -1,0 +1,16 @@
+# Runtime configuration and protected credentials
+gateway/gateway.json
+gateway/gateway-cert.pem
+gateway/gateway-key.pem
+**/*.dpapi
+**/config.json
+**/*_state.json
+
+# Generated runtime data
+**/logs/
+**/exports/
+**/diagnostics/
+**/__pycache__/
+**/*.backup_*
+**/*.bak_*
+**/*.tmp

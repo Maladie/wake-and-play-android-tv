@@ -42,3 +42,7 @@ app/.externalNativeBuild/
 
 # NDK stuff
 .cxx/
+
+# Python host tooling
+**/__pycache__/
+*.py[cod]
