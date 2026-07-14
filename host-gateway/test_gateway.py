@@ -1,0 +1,200 @@
+import json
+import unittest
+import urllib.parse
+from pathlib import Path
+
+from wakeplay_gateway import GatewayState, sha256_text
+
+
+class GatewayStateTest(unittest.TestCase):
+    def setUp(self):
+        self.config_path = Path(__file__).parent / ".gateway-test-runtime.json"
+        self.config_path.write_text(json.dumps({
+            "certificate": "cert.pem",
+            "private_key": "key.pem",
+            "clients": [],
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self.config_path.unlink(missing_ok=True)
+
+    def test_pair_stores_only_token_hash(self):
+        state = GatewayState(self.config_path, "123456")
+        result = state.pair("192.0.2.1", "123456", "Living room TV")
+
+        stored = json.loads(self.config_path.read_text(encoding="utf-8"))["clients"][0]
+        self.assertNotIn(result["token"], self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(sha256_text(result["token"]), stored["token_sha256"])
+        self.assertIsNotNone(state.client_for_token(result["token"]))
+
+    def test_invalid_pairing_code_is_rejected(self):
+        state = GatewayState(self.config_path, "123456")
+        with self.assertRaises(PermissionError):
+            state.pair("192.0.2.1", "000000", "TV")
+
+    def test_bridge_url_must_remain_on_loopback(self):
+        state = GatewayState(self.config_path, None)
+        state.config["vibepollo_bridge"] = "http://192.0.2.2:8775"
+        with self.assertRaises(ValueError):
+            state.bridge_url("vibepollo", "/health")
+
+    def test_idempotent_action_runs_once(self):
+        state = GatewayState(self.config_path, None)
+        calls = []
+
+        def operation():
+            calls.append(True)
+            return 200, {"ok": True}
+
+        first = state.idempotent("request-1", operation)
+        second = state.idempotent("request-1", operation)
+        self.assertEqual(first, second)
+        self.assertEqual(1, len(calls))
+
+    def test_discord_status_normalizes_bridge_health(self):
+        state = GatewayState(self.config_path, None)
+        state.proxy = lambda name, path, timeout=2.5: (True, {
+            "message": "ok\tconnected=True\tauthenticated=True\tpipe=discord-ipc-0\terror="
+        })
+
+        status = state.discord_status()
+
+        self.assertTrue(status["bridge_online"])
+        self.assertTrue(status["rpc_connected"])
+        self.assertTrue(status["authenticated"])
+        self.assertEqual("discord-ipc-0", status["pipe"])
+
+    def test_discord_channels_rejects_invalid_guild_id(self):
+        state = GatewayState(self.config_path, None)
+        state.discord_ready = lambda: (True, "")
+        with self.assertRaises(ValueError):
+            state.discord_channels("../../shutdown")
+
+    def test_discord_ready_preserves_bridge_profile_conflict(self):
+        state = GatewayState(self.config_path, None)
+        conflict = (
+            "Discord RPC is owned by another Windows profile. Fully exit Discord "
+            "in the other profile, then start it in this Bridge profile."
+        )
+        state.proxy = lambda name, path, timeout=2.5: (True, {
+            "message": "ok\tconnected=False\tauthenticated=False\tpipe=\terror=" + conflict
+        })
+
+        ready, error = state.discord_ready()
+
+        self.assertFalse(ready)
+        self.assertEqual(conflict, error)
+
+    def test_discord_join_uses_allowlisted_encoded_query(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.discord_ready = lambda: (True, "")
+        state.proxy = lambda name, path, timeout=2.5: (requests.append((name, path)) is None, {"message": "ok"})
+
+        status, result = state.discord_action("join", {
+            "channel_id": "123456789012345678",
+            "guild_id": "987654321098765432",
+            "guild_name": "A guild & friends",
+            "channel_name": "Games / voice",
+        })
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual("discord", requests[0][0])
+        parsed = urllib.parse.urlsplit(requests[0][1])
+        self.assertEqual("/join-advanced", parsed.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(["A guild & friends"], query["guild_name"])
+        self.assertEqual(["Games / voice"], query["channel_name"])
+
+    def test_discord_home_returns_conflict_before_calling_rpc(self):
+        state = GatewayState(self.config_path, None)
+        state.discord_ready = lambda: (False, "Discord client is not running in the Bridge user session.")
+        state.proxy = lambda *args, **kwargs: self.fail("RPC proxy must not run while Discord is unavailable")
+
+        status, result = state.discord_home()
+
+        self.assertEqual(409, status)
+        self.assertFalse(result["ok"])
+        self.assertIn("not running", result["error"])
+
+    def test_start_discord_is_a_separate_allowlisted_action(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy = lambda name, path, timeout=2.5: (requests.append((name, path)) is None, {"message": "ok"})
+
+        status, result = state.discord_action("start", {})
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual(("discord", "/start-discord"), requests[0])
+
+    def test_virtualhere_action_encodes_allowlisted_device_address(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy = lambda name, path, timeout=2.5: (requests.append((name, path)) is None, {"message": "ok"})
+
+        status, result = state.virtualhere_action("use", {"address": "gaming-pc.114"})
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual("discord", requests[0][0])
+        parsed = urllib.parse.urlsplit(requests[0][1])
+        self.assertEqual("/virtualhere-action", parsed.path)
+        self.assertEqual(["use"], urllib.parse.parse_qs(parsed.query)["action"])
+        self.assertEqual(["gaming-pc.114"], urllib.parse.parse_qs(parsed.query)["address"])
+
+    def test_virtualhere_action_rejects_untrusted_address(self):
+        state = GatewayState(self.config_path, None)
+        with self.assertRaises(ValueError):
+            state.virtualhere_action("stop", {"address": "../../shutdown"})
+
+    def test_discord_participant_volume_is_strictly_allowlisted(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.discord_ready = lambda: (True, "")
+        state.proxy = lambda name, path, timeout=2.5: (requests.append(path) is None, {"message": "ok"})
+
+        status, result = state.discord_action("user-volume", {
+            "user_id": "123456789012345678",
+            "delta": -10,
+        })
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        parsed = urllib.parse.urlsplit(requests[0])
+        self.assertEqual("/user-volume", parsed.path)
+        self.assertEqual(["-10"], urllib.parse.parse_qs(parsed.query)["delta"])
+        with self.assertRaises(ValueError):
+            state.discord_action("user-volume", {
+                "user_id": "123456789012345678", "delta": 1000})
+        status, result = state.discord_action("user-volume", {
+            "user_id": "123456789012345678", "volume": 140})
+        self.assertEqual(200, status)
+        self.assertEqual(["140"], urllib.parse.parse_qs(
+            urllib.parse.urlsplit(requests[-1]).query)["value"])
+
+    def test_audio_device_selection_is_allowlisted_and_encoded(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.discord_ready = lambda: (True, "")
+        state.proxy = lambda name, path, timeout=2.5: (requests.append(path) is None, {"message": "ok"})
+
+        status, result = state.audio_action("select", {
+            "scope": "discord",
+            "kind": "input",
+            "device_id": "{0.0.1.00000000}.{1234-abcd}",
+        })
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        parsed = urllib.parse.urlsplit(requests[0])
+        self.assertEqual("/select-device", parsed.path)
+        self.assertEqual(["input"], urllib.parse.parse_qs(parsed.query)["kind"])
+        with self.assertRaises(ValueError):
+            state.audio_action("select", {
+                "scope": "system", "kind": "output", "device_id": "../../shutdown"})
+
+
+if __name__ == "__main__":
+    unittest.main()

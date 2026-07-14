@@ -31,6 +31,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -44,6 +45,9 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.EditText;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -59,7 +63,6 @@ import java.net.SocketAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -92,6 +95,10 @@ public final class LauncherActivity extends Activity {
     private static final String EXTRA_EXTERNAL_FRONTEND_MESSAGE = "com.limelight.extra.EXTERNAL_FRONTEND_MESSAGE";
     private static final String EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH = "com.limelight.extra.EXTERNAL_FRONTEND_ANIMATION_EPOCH";
     private static final String EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION = "com.limelight.extra.EXTERNAL_FRONTEND_REDUCED_MOTION";
+    private static final String EXTRA_HOST_GATEWAY_ENDPOINT = "com.limelight.extra.HOST_GATEWAY_ENDPOINT";
+    private static final String EXTRA_HOST_GATEWAY_TOKEN = "com.limelight.extra.HOST_GATEWAY_TOKEN";
+    private static final String EXTRA_HOST_GATEWAY_CERTIFICATE = "com.limelight.extra.HOST_GATEWAY_CERTIFICATE";
+    private static final String EXTRA_DISCORD_PROFILE_ID = "com.limelight.extra.DISCORD_PROFILE_ID";
     private static final long HOST_TIMEOUT_MS = 90_000;
     private static final long CONTROLLER_BATTERY_REFRESH_MS = 60_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
@@ -105,6 +112,7 @@ public final class LauncherActivity extends Activity {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final LifecycleRequestGate dashboardRequests = new LifecycleRequestGate();
     private final InputManager.InputDeviceListener controllerDeviceListener =
             new InputManager.InputDeviceListener() {
                 @Override
@@ -124,7 +132,12 @@ public final class LauncherActivity extends Activity {
             };
     private final AtomicBoolean launchCancelled = new AtomicBoolean(false);
     private final AtomicBoolean hostProbeRunning = new AtomicBoolean(false);
+    private final AtomicInteger hostProbeRequest = new AtomicInteger();
     private final AtomicInteger backdropRequest = new AtomicInteger();
+    private final AtomicInteger integrationPanelRequest = new AtomicInteger();
+    private final AtomicInteger communityAvailabilityRequest = new AtomicInteger();
+    private final HostGatewayClient hostGatewayClient = new HostGatewayClient();
+    private final Set<String> discordAutoConnectAttempted = new HashSet<>();
     private final Map<String, TextView> hostStatusViews = new HashMap<>();
     private List<Host> visibleHosts = Collections.emptyList();
     private StreamStatus currentStreamStatus;
@@ -136,6 +149,7 @@ public final class LauncherActivity extends Activity {
     private boolean dashboardActive;
     private boolean controllerListenerRegistered;
     private InputManager inputManager;
+    private HostGatewayStore hostGatewayStore;
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
     private LinearLayout appRow;
@@ -152,9 +166,12 @@ public final class LauncherActivity extends Activity {
     private TextView resumeSubtitle;
     private LinearLayout sessionButton;
     private TextView sessionTitle;
+    private TextView communityButton;
     private TextView settingsButton;
     private FrameLayout modalLayer;
+    private ScrollView sidePanelScroll;
     private LinearLayout sidePanel;
+    private Runnable sidePanelBackAction;
     private ImageView artworkBackdrop;
     private ImageView artworkHero;
     private View artworkScrim;
@@ -176,6 +193,14 @@ public final class LauncherActivity extends Activity {
     private View lastFocusedTile;
     private View lastContentFocus;
     private View focusAfterExternalActivity;
+    private Runnable communityExitAction;
+    private Host discordShortcutHost;
+    private HostGatewayClient.Connection discordShortcutConnection;
+    private TextView discordShortcutVoiceStatus;
+    private TextView discordShortcutMuteAction;
+    private TextView discordShortcutLeaveAction;
+    private boolean discordShortcutVoiceConnected;
+    private boolean discordShortcutMuted;
     private boolean restoreFocusAfterResume;
     private boolean uiSoundsEnabled;
     private boolean reducedMotion;
@@ -214,6 +239,7 @@ public final class LauncherActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         inputManager = (InputManager) getSystemService(INPUT_SERVICE);
+        hostGatewayStore = new HostGatewayStore(this);
         uiSoundsEnabled = history().getBoolean(PREF_UI_SOUNDS, true);
         reducedMotion = history().getBoolean(PREF_REDUCED_MOTION, false);
         // Always submit a complete opaque frame. Sony's compositor otherwise
@@ -227,6 +253,8 @@ public final class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         dashboardActive = true;
+        discordAutoConnectAttempted.clear();
+        int dashboardToken = dashboardRequests.activate();
         if (inputManager != null && !controllerListenerRegistered) {
             inputManager.registerInputDeviceListener(controllerDeviceListener, mainHandler);
             controllerListenerRegistered = true;
@@ -241,7 +269,7 @@ public final class LauncherActivity extends Activity {
             initialFocusDeadline = initialFocusPending ? Long.MAX_VALUE : 0L;
             sessionStatusLoaded = false;
             showHome();
-            refreshDashboard();
+            refreshDashboard(dashboardToken);
             if (initialFocusPending) {
                 // The initial provider reads above are complete now, so the
                 // deadline begins when the UI is actually ready for input.
@@ -259,6 +287,12 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onPause() {
         dashboardActive = false;
+        dashboardRequests.deactivate();
+        backdropRequest.incrementAndGet();
+        hostProbeRequest.incrementAndGet();
+        hostProbeRunning.set(false);
+        integrationPanelRequest.incrementAndGet();
+        communityAvailabilityRequest.incrementAndGet();
         if (inputManager != null && controllerListenerRegistered) {
             inputManager.unregisterInputDeviceListener(controllerDeviceListener);
             controllerListenerRegistered = false;
@@ -296,7 +330,13 @@ public final class LauncherActivity extends Activity {
     @Override
     public void onBackPressed() {
         if (modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) {
-            hideSidePanel(true);
+            Runnable backAction = sidePanelBackAction;
+            if (backAction != null) {
+                sidePanelBackAction = null;
+                backAction.run();
+            } else {
+                hideSidePanel(true);
+            }
         } else if (loadingLayer.getVisibility() == View.VISIBLE) {
             launchCancelled.set(true);
             showHome();
@@ -314,6 +354,18 @@ public final class LauncherActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0 &&
+                modalLayer != null && modalLayer.getVisibility() == View.VISIBLE &&
+                discordShortcutConnection != null) {
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_X) {
+                runDiscordControllerShortcut(false);
+                return true;
+            }
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_Y) {
+                runDiscordControllerShortcut(true);
+                return true;
+            }
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN && isNavigationKey(event.getKeyCode())) {
             // If the user starts navigating before the asynchronous dashboard data
             // arrives, their choice wins over the delayed default Resume focus.
@@ -473,6 +525,30 @@ public final class LauncherActivity extends Activity {
         sessionButtonParams.leftMargin = dp(10);
         quickActions.addView(sessionButton, sessionButtonParams);
 
+        LinearLayout topActions = new LinearLayout(this);
+        topActions.setOrientation(LinearLayout.HORIZONTAL);
+        topActions.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout.LayoutParams topActionsParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
+        topActionsParams.topMargin = dp(30);
+        topActionsParams.rightMargin = dp(64);
+        homeLayer.addView(topActions, topActionsParams);
+
+        communityButton = text("●  DISCORD", 13, 0xFFD2C4FF, true);
+        communityButton.setFocusable(true);
+        communityButton.setClickable(true);
+        communityButton.setSoundEffectsEnabled(false);
+        communityButton.setPadding(dp(12), dp(5), dp(12), dp(5));
+        communityButton.setVisibility(View.GONE);
+        communityButton.setOnClickListener(v -> showCommunityForSelectedHost());
+        communityButton.setOnFocusChangeListener((v, focused) ->
+                styleCompactButton(communityButton, focused));
+        styleCompactButton(communityButton, false);
+        LinearLayout.LayoutParams communityParams = wrap();
+        communityParams.rightMargin = dp(10);
+        topActions.addView(communityButton, communityParams);
+
         settingsButton = text("⚙  OPTIONS", 13, 0xFFD2C4FF, true);
         settingsButton.setFocusable(true);
         settingsButton.setClickable(true);
@@ -481,22 +557,17 @@ public final class LauncherActivity extends Activity {
         settingsButton.setOnClickListener(v -> showOptionsPanel());
         settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
         styleCompactButton(settingsButton, false);
-        FrameLayout.LayoutParams settingsParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.END);
-        settingsParams.topMargin = dp(30);
-        settingsParams.rightMargin = dp(64);
-        homeLayer.addView(settingsButton, settingsParams);
+        topActions.addView(settingsButton, wrap());
 
         resumeButton.setId(View.generateViewId());
         sessionButton.setId(View.generateViewId());
+        communityButton.setId(View.generateViewId());
         settingsButton.setId(View.generateViewId());
-        resumeButton.setNextFocusUpId(settingsButton.getId());
         resumeButton.setNextFocusRightId(sessionButton.getId());
         sessionButton.setNextFocusLeftId(resumeButton.getId());
-        sessionButton.setNextFocusUpId(settingsButton.getId());
-        settingsButton.setNextFocusDownId(resumeButton.getId());
-        settingsButton.setNextFocusLeftId(resumeButton.getId());
+        communityButton.setNextFocusRightId(settingsButton.getId());
+        communityButton.setNextFocusDownId(resumeButton.getId());
+        updateCommunityButtonVisibility(false);
 
         controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
@@ -584,27 +655,38 @@ public final class LauncherActivity extends Activity {
         return root;
     }
 
-    private void refreshDashboard() {
-        refreshControllersAsync();
+    private void refreshDashboard(int dashboardToken) {
+        refreshControllersAsync(dashboardToken);
         // Perform the small local provider reads before the first focus decision.
         // If these arrive later, making Resume visible can cause Android TV to
         // redirect focus while the user is already navigating the dashboard.
         renderStreamStatus(loadStreamStatus());
         renderHosts(loadHosts());
-        mainHandler.postDelayed(this::refreshSessionStatusAsync, 1500);
+        mainHandler.postDelayed(() -> refreshSessionStatusAsync(dashboardToken), 1500);
     }
 
     private void refreshSessionStatusAsync() {
+        refreshSessionStatusAsync(dashboardRequests.currentToken());
+    }
+
+    private void refreshSessionStatusAsync(int dashboardToken) {
+        if (!isCurrentDashboardRequest(dashboardToken)) return;
         executor.execute(() -> {
             StreamStatus status = loadStreamStatus();
             mainHandler.post(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (!isCurrentDashboardRequest(dashboardToken)) return;
                 renderStreamStatus(status);
                 if (homeLayer.getVisibility() == View.VISIBLE) {
-                    mainHandler.postDelayed(this::refreshSessionStatusAsync, 1500);
+                    mainHandler.postDelayed(
+                            () -> refreshSessionStatusAsync(dashboardToken), 1500);
                 }
             });
         });
+    }
+
+    private boolean isCurrentDashboardRequest(int dashboardToken) {
+        return dashboardRequests.isCurrent(dashboardToken) &&
+                !isFinishing() && !isDestroyed();
     }
 
     private StreamStatus loadStreamStatus() {
@@ -678,11 +760,15 @@ public final class LauncherActivity extends Activity {
     }
 
     private void refreshControllersAsync() {
-        if (!dashboardActive) return;
+        refreshControllersAsync(dashboardRequests.currentToken());
+    }
+
+    private void refreshControllersAsync(int dashboardToken) {
+        if (!isCurrentDashboardRequest(dashboardToken)) return;
         executor.execute(() -> {
             List<ControllerInfo> controllers = loadControllers();
             mainHandler.post(() -> {
-                if (!dashboardActive || isFinishing() || isDestroyed()) return;
+                if (!isCurrentDashboardRequest(dashboardToken)) return;
                 renderControllers(controllers);
                 mainHandler.postDelayed(controllerRefreshRunnable,
                         CONTROLLER_BATTERY_REFRESH_MS);
@@ -710,7 +796,8 @@ public final class LauncherActivity extends Activity {
             if (descriptor != null && !descriptors.add(descriptor)) continue;
             devices.add(device);
         }
-        devices.sort(Comparator.comparing(InputDevice::getName));
+        Collections.sort(devices,
+                (left, right) -> left.getName().compareToIgnoreCase(right.getName()));
         List<ControllerInfo> controllers = new ArrayList<>();
         for (InputDevice device : devices) {
             int percentage = -1;
@@ -957,7 +1044,10 @@ public final class LauncherActivity extends Activity {
     }
 
     private void selectHost(Host host, boolean moveFocusToApps) {
+        int dashboardToken = dashboardRequests.currentToken();
+        if (!isCurrentDashboardRequest(dashboardToken)) return;
         selectedHost = host;
+        refreshCommunityAvailability(host);
         clearArtworkBackdrop();
         appsLabel.setText("APPS · " + host.name.toUpperCase(Locale.ROOT));
         appRow.removeAllViews();
@@ -966,9 +1056,15 @@ public final class LauncherActivity extends Activity {
         executor.execute(() -> {
             List<StreamApp> apps = loadApps(host);
             mainHandler.post(() -> {
+                if (!isCurrentDashboardRequest(dashboardToken)) return;
                 if (selectedHost == null || !host.uuid.equals(selectedHost.uuid)) return;
                 renderApps(host, apps);
-                if (moveFocusToApps && !apps.isEmpty()) appRow.getChildAt(0).requestFocus();
+                // Loading is asynchronous. Only continue the user's explicit
+                // host-to-app navigation if they are still focused on that host.
+                if (moveFocusToApps && !apps.isEmpty() && selectedHostCard != null &&
+                        selectedHostCard.hasFocus()) {
+                    appRow.getChildAt(0).requestFocus();
+                }
             });
         });
     }
@@ -1073,10 +1169,20 @@ public final class LauncherActivity extends Activity {
 
     private void loadPosterAsync(Uri uri, ImageView target) {
         if (uri == null) return;
+        int dashboardToken = dashboardRequests.currentToken();
         executor.execute(() -> {
             try {
                 Bitmap bitmap = decodePoster(uri, 512);
-                if (bitmap != null) mainHandler.post(() -> target.setImageBitmap(bitmap));
+                if (bitmap != null) {
+                    mainHandler.post(() -> {
+                        if (isCurrentDashboardRequest(dashboardToken) &&
+                                target.isAttachedToWindow()) {
+                            target.setImageBitmap(bitmap);
+                        } else if (!bitmap.isRecycled()) {
+                            bitmap.recycle();
+                        }
+                    });
+                }
             } catch (Exception ignored) { }
         });
     }
@@ -1101,13 +1207,16 @@ public final class LauncherActivity extends Activity {
             clearArtworkBackdrop();
             return;
         }
+        int dashboardToken = dashboardRequests.currentToken();
+        if (!isCurrentDashboardRequest(dashboardToken)) return;
         int request = backdropRequest.incrementAndGet();
         showArtworkPreview(request, poster != null ? poster.getDrawable() : null);
         // Ignore only extremely short focus fly-overs. The visible preview above
         // starts immediately, while the blurred layer is prepared off the UI thread.
         mainHandler.postDelayed(() -> {
-            if (request != backdropRequest.get() || isFinishing() || isDestroyed()) return;
-            executor.execute(() -> loadArtworkBackdrop(request, uri));
+            if (request != backdropRequest.get() ||
+                    !isCurrentDashboardRequest(dashboardToken)) return;
+            executor.execute(() -> loadArtworkBackdrop(dashboardToken, request, uri));
         }, 35);
     }
 
@@ -1139,7 +1248,7 @@ public final class LauncherActivity extends Activity {
         return state != null ? state.newDrawable(getResources()).mutate() : drawable;
     }
 
-    private void loadArtworkBackdrop(int request, Uri uri) {
+    private void loadArtworkBackdrop(int dashboardToken, int request, Uri uri) {
         ArtworkBackdropResult result = null;
         Bitmap hero = null;
         try {
@@ -1150,11 +1259,69 @@ public final class LauncherActivity extends Activity {
             Log.w(TAG, "Unable to load artwork backdrop", error);
         }
         ArtworkBackdropResult loaded = result;
-        mainHandler.post(() -> applyArtworkBackdrop(request, loaded));
+        mainHandler.post(() -> applyArtworkBackdrop(dashboardToken, request, loaded));
     }
 
-    private void applyArtworkBackdrop(int request, ArtworkBackdropResult result) {
-        if (request != backdropRequest.get() || isFinishing() || isDestroyed()) {
+    private void refreshCommunityAvailability(Host host) {
+        int request = communityAvailabilityRequest.incrementAndGet();
+        updateCommunityButtonVisibility(false);
+        if (host == null || host.uuid == null) return;
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) return;
+        executor.submit(() -> {
+            boolean available = false;
+            try {
+                available = hostGatewayClient.getCapabilities(connection).discord;
+            } catch (IOException error) {
+                Log.w(TAG, "Unable to check Community availability for " + host.uuid, error);
+            }
+            boolean show = available;
+            mainHandler.post(() -> {
+                if (request != communityAvailabilityRequest.get() ||
+                        selectedHost == null || !host.uuid.equals(selectedHost.uuid) ||
+                        !dashboardActive) return;
+                updateCommunityButtonVisibility(show);
+            });
+        });
+    }
+
+    private void updateCommunityButtonVisibility(boolean visible) {
+        if (communityButton == null || settingsButton == null ||
+                resumeButton == null || sessionButton == null) return;
+        communityButton.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (visible) {
+            communityButton.setNextFocusRightId(settingsButton.getId());
+            communityButton.setNextFocusDownId(resumeButton.getId());
+            settingsButton.setNextFocusLeftId(communityButton.getId());
+            settingsButton.setNextFocusDownId(sessionButton.getId());
+            resumeButton.setNextFocusUpId(communityButton.getId());
+            sessionButton.setNextFocusUpId(settingsButton.getId());
+        } else {
+            settingsButton.setNextFocusLeftId(resumeButton.getId());
+            settingsButton.setNextFocusDownId(resumeButton.getId());
+            resumeButton.setNextFocusUpId(settingsButton.getId());
+            sessionButton.setNextFocusUpId(settingsButton.getId());
+        }
+    }
+
+    private void showCommunityForSelectedHost() {
+        Host host = selectedHost;
+        if (host == null || host.uuid == null) {
+            Toast.makeText(this, "Choose a streaming host first.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) {
+            Toast.makeText(this, "Pair this host gateway first.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        showDiscordPanel(host, connection, () -> hideSidePanel(true));
+    }
+
+    private void applyArtworkBackdrop(int dashboardToken, int request,
+                                      ArtworkBackdropResult result) {
+        if (request != backdropRequest.get() ||
+                !isCurrentDashboardRequest(dashboardToken)) {
             if (result != null) result.recycle();
             return;
         }
@@ -1310,6 +1477,7 @@ public final class LauncherActivity extends Activity {
 
     private void beginAppLaunch(Host host, StreamApp app) {
         launchCancelled.set(false);
+        maybePrepareDiscordForStream(host);
         homeLayer.setVisibility(View.GONE);
         loadingLayer.setVisibility(View.VISIBLE);
         loadingTitle.setText(app.name);
@@ -1401,6 +1569,7 @@ public final class LauncherActivity extends Activity {
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_MESSAGE, loadingMessage.getText().toString());
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH, slideshow.getStartedAt());
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION, reducedMotion);
+        putHostGatewayExtras(intent, host);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
                 Intent.FLAG_ACTIVITY_CLEAR_TOP |
                 Intent.FLAG_ACTIVITY_NO_ANIMATION);
@@ -1438,9 +1607,13 @@ public final class LauncherActivity extends Activity {
                     if (host.uuid != null && host.name != null) hosts.add(host);
                 }
                 String lastHostUuid = history().getString(PREF_LAST_HOST_UUID, null);
-                hosts.sort(Comparator
-                        .comparingInt((Host host) -> host.uuid.equals(lastHostUuid) ? 0 : 1)
-                        .thenComparing(host -> host.name.toLowerCase(Locale.ROOT)));
+                Collections.sort(hosts, (left, right) -> {
+                    int leftPriority = left.uuid.equals(lastHostUuid) ? 0 : 1;
+                    int rightPriority = right.uuid.equals(lastHostUuid) ? 0 : 1;
+                    int byPriority = Integer.compare(leftPriority, rightPriority);
+                    return byPriority != 0 ? byPriority :
+                            left.name.compareToIgnoreCase(right.name);
+                });
                 Log.i(TAG, "Loaded " + hosts.size() + " host(s) from " + uri);
                 if (!hosts.isEmpty()) return hosts;
             } catch (RuntimeException error) {
@@ -1467,7 +1640,7 @@ public final class LauncherActivity extends Activity {
         } catch (RuntimeException error) {
             Log.e(TAG, "Unable to query cached apps from " + uri, error);
         }
-        apps.sort((left, right) -> {
+        Collections.sort(apps, (left, right) -> {
             int byRecent = Long.compare(appPlayedAt(host, right), appPlayedAt(host, left));
             return byRecent != 0 ? byRecent :
                     left.name.compareToIgnoreCase(right.name);
@@ -1600,6 +1773,15 @@ public final class LauncherActivity extends Activity {
         // Wake & Play instead of finishing the stream.
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND, true);
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_PACKAGE, getPackageName());
+        Host integrationHost = null;
+        for (Host host : visibleHosts) {
+            if (isSameHost(currentStreamStatus, host)) {
+                integrationHost = host;
+                break;
+            }
+        }
+        if (integrationHost == null) integrationHost = selectedHost;
+        putHostGatewayExtras(intent, integrationHost);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent, ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle());
@@ -1622,19 +1804,26 @@ public final class LauncherActivity extends Activity {
         dim.setOnClickListener(v -> hideSidePanel(true));
         modalLayer.addView(dim, match());
 
+        sidePanelScroll = new ScrollView(this);
+        sidePanelScroll.setFillViewport(true);
+        sidePanelScroll.setVerticalScrollBarEnabled(false);
+        sidePanelScroll.setFadingEdgeLength(0);
+
         sidePanel = new LinearLayout(this);
         sidePanel.setOrientation(LinearLayout.VERTICAL);
-        sidePanel.setPadding(dp(34), dp(42), dp(34), dp(32));
+        sidePanel.setPadding(dp(34), dp(26), dp(34), dp(20));
         GradientDrawable panelBackground = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 new int[]{0xF51A1D2A, 0xF0221B38, 0xFA090B12});
         panelBackground.setCornerRadii(new float[]{dp(24), dp(24), 0, 0, 0, 0, dp(24), dp(24)});
         panelBackground.setStroke(dp(1), 0x707B6AA9);
-        sidePanel.setBackground(panelBackground);
-        sidePanel.setElevation(dp(18));
+        sidePanelScroll.setBackground(panelBackground);
+        sidePanelScroll.setElevation(dp(18));
+        sidePanelScroll.addView(sidePanel, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
                 dp(510), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
-        modalLayer.addView(sidePanel, panelParams);
+        modalLayer.addView(sidePanelScroll, panelParams);
         homeLayer.addView(modalLayer, match());
     }
 
@@ -1643,16 +1832,72 @@ public final class LauncherActivity extends Activity {
         action.setFocusable(true);
         action.setClickable(true);
         action.setSoundEffectsEnabled(false);
-        action.setMinHeight(dp(56));
-        action.setPadding(dp(18), dp(10), dp(18), dp(10));
+        action.setMinHeight(dp(44));
+        action.setPadding(dp(16), dp(7), dp(16), dp(7));
         action.setOnFocusChangeListener((v, focused) -> styleCompactButton(action, focused));
         styleCompactButton(action, false);
         return action;
     }
 
+    private void putHostGatewayExtras(Intent intent, Host host) {
+        if (intent == null || host == null || hostGatewayStore == null) return;
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) return;
+        intent.putExtra(EXTRA_HOST_GATEWAY_ENDPOINT, connection.endpoint);
+        intent.putExtra(EXTRA_HOST_GATEWAY_TOKEN, connection.token);
+        intent.putExtra(EXTRA_HOST_GATEWAY_CERTIFICATE, connection.certificateSha256);
+        intent.putExtra(EXTRA_DISCORD_PROFILE_ID,
+                HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID);
+    }
+
+    private LinearLayout panelActionRow(View... actions) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        for (int index = 0; index < actions.length; index++) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (index > 0) params.leftMargin = dp(8);
+            row.addView(actions[index], params);
+        }
+        return row;
+    }
+
+    private LinearLayout panelWeightedActionRow(View main, View secondary) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(main, new LinearLayout.LayoutParams(
+                0, dp(44), 2f));
+        LinearLayout.LayoutParams secondaryParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        secondaryParams.leftMargin = dp(8);
+        row.addView(secondary, secondaryParams);
+        return row;
+    }
+
+    private SeekBar panelVolumeSlider(int progress) {
+        SeekBar slider = new SeekBar(this);
+        slider.setFocusable(true);
+        slider.setMax(200);
+        slider.setKeyProgressIncrement(10);
+        slider.setProgress(Math.max(0, Math.min(200,
+                Math.round(progress / 10f) * 10)));
+        slider.setPadding(dp(14), dp(8), dp(14), dp(8));
+        slider.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFF8D7AD1));
+        slider.setThumbTintList(android.content.res.ColorStateList.valueOf(0xFFE9E3FF));
+        return slider;
+    }
+
     private void showSidePanel(String eyebrow, String title, String details, View... actions) {
+        showSidePanel(eyebrow, title, details, (Runnable) null, actions);
+    }
+
+    private void showSidePanel(String eyebrow, String title, String details,
+                               Runnable backAction, View... actions) {
         if (modalLayer == null) return;
         if (modalLayer.getVisibility() != View.VISIBLE) lastContentFocus = getCurrentFocus();
+        sidePanelBackAction = backAction;
         sidePanel.removeAllViews();
 
         TextView eyebrowView = text(eyebrow, 12, 0xFFAFA4C9, true);
@@ -1666,80 +1911,131 @@ public final class LauncherActivity extends Activity {
             detailsView.setLineSpacing(dp(3), 1f);
             LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            detailsParams.topMargin = dp(14);
-            detailsParams.bottomMargin = dp(26);
+            detailsParams.topMargin = dp(10);
+            detailsParams.bottomMargin = dp(16);
             sidePanel.addView(detailsView, detailsParams);
         }
 
-        View firstAction = null;
-        List<View> focusableActions = new ArrayList<>();
         for (View action : actions) {
-            if (action.isFocusable()) {
-                if (firstAction == null) firstAction = action;
-                action.setId(View.generateViewId());
-                focusableActions.add(action);
-            }
             LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            actionParams.bottomMargin = dp(10);
+            actionParams.bottomMargin = dp(6);
             sidePanel.addView(action, actionParams);
         }
-        for (int i = 0; i < focusableActions.size(); i++) {
-            View action = focusableActions.get(i);
-            View previous = focusableActions.get(Math.max(0, i - 1));
-            View next = focusableActions.get(Math.min(focusableActions.size() - 1, i + 1));
-            action.setNextFocusUpId(previous.getId());
-            action.setNextFocusDownId(next.getId());
-            action.setNextFocusLeftId(action.getId());
-            action.setNextFocusRightId(action.getId());
-        }
 
-        TextView hint = text("BACK  ·  CLOSE", 11, 0x8FFFFFFF, true);
+        TextView hint = text(backAction != null ? "BACK  ·  PREVIOUS" : "BACK  ·  CLOSE",
+                11, 0x8FFFFFFF, true);
         LinearLayout.LayoutParams hintParams = wrap();
         hintParams.topMargin = dp(12);
         sidePanel.addView(hint, hintParams);
 
+        rebuildSidePanelFocusNavigation();
+        View firstAction = firstVisibleSidePanelAction();
+
         modalLayer.setVisibility(View.VISIBLE);
         modalLayer.setAlpha(1f);
-        sidePanel.animate().cancel();
+        sidePanelScroll.animate().cancel();
+        sidePanelScroll.scrollTo(0, 0);
         if (reducedMotion) {
-            sidePanel.setTranslationX(0f);
+            sidePanelScroll.setTranslationX(0f);
         } else {
-            sidePanel.setTranslationX(dp(510));
-            sidePanel.animate().translationX(0f).setDuration(180).start();
+            sidePanelScroll.setTranslationX(dp(510));
+            sidePanelScroll.animate().translationX(0f).setDuration(180).start();
         }
-        View focusTarget = firstAction;
-        if (focusTarget != null) focusTarget.post(focusTarget::requestFocus);
+        if (firstAction != null) firstAction.post(firstAction::requestFocus);
+    }
+
+    private View firstVisibleSidePanelAction() {
+        for (List<View> row : sidePanelFocusRows()) {
+            if (!row.isEmpty()) return row.get(0);
+        }
+        return null;
+    }
+
+    private void rebuildSidePanelFocusNavigation() {
+        List<List<View>> rows = sidePanelFocusRows();
+        for (List<View> row : rows) {
+            for (View action : row) {
+                if (action.getId() == View.NO_ID) action.setId(View.generateViewId());
+            }
+        }
+        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            List<View> row = rows.get(rowIndex);
+            for (int column = 0; column < row.size(); column++) {
+                View action = row.get(column);
+                List<View> previousRow = rows.get(Math.max(0, rowIndex - 1));
+                List<View> nextRow = rows.get(Math.min(rows.size() - 1, rowIndex + 1));
+                View previous = previousRow.get(Math.min(column, previousRow.size() - 1));
+                View next = nextRow.get(Math.min(column, nextRow.size() - 1));
+                View left = row.get(Math.max(0, column - 1));
+                View right = row.get(Math.min(row.size() - 1, column + 1));
+                action.setNextFocusUpId(previous.getId());
+                action.setNextFocusDownId(next.getId());
+                action.setNextFocusLeftId(left.getId());
+                action.setNextFocusRightId(right.getId());
+            }
+        }
+    }
+
+    private List<List<View>> sidePanelFocusRows() {
+        List<List<View>> rows = new ArrayList<>();
+        if (sidePanel == null) return rows;
+        for (int index = 0; index < sidePanel.getChildCount(); index++) {
+            View child = sidePanel.getChildAt(index);
+            if (child.getVisibility() != View.VISIBLE) continue;
+            List<View> row = new ArrayList<>();
+            collectFocusableViews(child, row);
+            if (!row.isEmpty()) rows.add(row);
+        }
+        return rows;
+    }
+
+    private static void collectFocusableViews(View view, List<View> result) {
+        if (view.getVisibility() != View.VISIBLE) return;
+        if (view.isFocusable()) result.add(view);
+        if (!(view instanceof ViewGroup)) return;
+        ViewGroup group = (ViewGroup) view;
+        for (int index = 0; index < group.getChildCount(); index++) {
+            collectFocusableViews(group.getChildAt(index), result);
+        }
     }
 
     private void hideSidePanel(boolean restoreFocus) {
         if (modalLayer == null || modalLayer.getVisibility() != View.VISIBLE) return;
         Runnable finish = () -> {
             modalLayer.setVisibility(View.GONE);
-            sidePanel.setTranslationX(0f);
+            sidePanelScroll.setTranslationX(0f);
+            sidePanelBackAction = null;
+            communityExitAction = null;
+            clearDiscordControllerShortcuts();
             if (restoreFocus && lastContentFocus != null && lastContentFocus.isShown()) {
                 lastContentFocus.requestFocus();
             }
         };
-        sidePanel.animate().cancel();
+        sidePanelScroll.animate().cancel();
         if (reducedMotion) {
             finish.run();
         } else {
-            sidePanel.animate().translationX(dp(510)).setDuration(150).withEndAction(finish).start();
+            sidePanelScroll.animate().translationX(dp(510)).setDuration(150).withEndAction(finish).start();
         }
     }
 
     private void dismissSidePanelImmediately() {
-        if (sidePanel != null) {
-            sidePanel.animate().cancel();
-            sidePanel.setTranslationX(0f);
+        sidePanelBackAction = null;
+        communityExitAction = null;
+        clearDiscordControllerShortcuts();
+        if (sidePanelScroll != null) {
+            sidePanelScroll.animate().cancel();
+            sidePanelScroll.setTranslationX(0f);
         }
         if (modalLayer != null) modalLayer.setVisibility(View.GONE);
     }
 
     private void showOptionsPanel() {
+        clearDiscordControllerShortcuts();
         TextView soundAction = panelAction("UI SOUNDS  ·  " + (uiSoundsEnabled ? "ON" : "OFF"));
         TextView motionAction = panelAction("REDUCED MOTION  ·  " + (reducedMotion ? "ON" : "OFF"));
+        TextView integrationsAction = panelAction("HOST INTEGRATIONS  ›");
         TextView moonlightAction = panelAction("MOONLIGHT SETTINGS  ›");
         soundAction.setOnClickListener(v -> {
             uiSoundsEnabled = !uiSoundsEnabled;
@@ -1752,13 +2048,1330 @@ public final class LauncherActivity extends Activity {
             motionAction.setText("REDUCED MOTION  ·  " + (reducedMotion ? "ON" : "OFF"));
             refreshGlassStyles();
         });
+        integrationsAction.setOnClickListener(v -> showIntegrationsPanel());
         moonlightAction.setOnClickListener(v -> openMoonlightSettings());
         showSidePanel("WAKE & PLAY", "Options",
                 "Tune the console interface or open Moonlight's streaming preferences.",
-                soundAction, motionAction, moonlightAction);
+                soundAction, motionAction, integrationsAction, moonlightAction);
+    }
+
+    private TextView panelStatus(String value) {
+        TextView status = text(value, 14, 0xFFC1C5D6, false);
+        status.setLineSpacing(dp(3), 1f);
+        status.setFocusable(false);
+        status.setPadding(dp(4), dp(6), dp(4), dp(14));
+        return status;
+    }
+
+    private void showIntegrationsPanel() {
+        clearDiscordControllerShortcuts();
+        Host host = selectedHost;
+        if (host == null || host.uuid == null || host.address == null || host.address.isEmpty()) {
+            Toast.makeText(this, "Choose a streaming host first.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) {
+            TextView pairAction = panelAction("PAIR HOST GATEWAY");
+            pairAction.setOnClickListener(v -> showPairingDialog(host));
+            showSidePanel("HOST INTEGRATIONS", host.name,
+                    "Start the Wake & Play Host Gateway on this PC, then enter its six-digit pairing code. " +
+                            "Discord and repair options remain hidden until the corresponding Bridge is detected.",
+                    this::showOptionsPanel, pairAction);
+            return;
+        }
+
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Gateway: checking…");
+        TextView vibepolloStatus = panelStatus("Vibepollo Bridge: checking…");
+        TextView discordStatus = panelStatus("Discord Bridge: checking…");
+        TextView vibepolloAction = panelAction("VIBEPOLLO FIX  ›");
+        TextView discordAction = panelAction("OPEN DISCORD  ›");
+        TextView refreshAction = panelAction("REFRESH STATUS");
+        TextView unpairAction = panelAction("FORGET THIS GATEWAY");
+        vibepolloAction.setVisibility(View.GONE);
+        discordAction.setVisibility(View.GONE);
+        vibepolloAction.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
+        discordAction.setOnClickListener(v -> showDiscordPanel(
+                host, connection, this::showIntegrationsPanel));
+        refreshAction.setOnClickListener(v -> showIntegrationsPanel());
+        unpairAction.setOnClickListener(v -> confirmForgetGateway(host));
+        showSidePanel("HOST INTEGRATIONS", host.name,
+                "Paired gateway: " + connection.endpoint,
+                this::showOptionsPanel,
+                status, vibepolloStatus, discordStatus,
+                vibepolloAction, discordAction, refreshAction, unpairAction);
+
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.Capabilities capabilities = hostGatewayClient.getCapabilities(connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Gateway: online");
+                    vibepolloStatus.setText("Vibepollo Bridge: " +
+                            (capabilities.vibepolloFix ? "online" : "offline"));
+                    discordStatus.setText("Discord Bridge: " +
+                            (capabilities.discord ? "online" : "offline"));
+                    vibepolloAction.setVisibility(capabilities.vibepolloFix ? View.VISIBLE : View.GONE);
+                    discordAction.setVisibility(capabilities.discord ? View.VISIBLE : View.GONE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Gateway: unavailable\n" + friendlyGatewayError(error));
+                    vibepolloStatus.setText("Vibepollo Bridge: status unavailable");
+                    discordStatus.setText("Discord Bridge: status unavailable");
+                });
+            }
+        });
+    }
+
+    private boolean isCurrentIntegrationPanel(int request, String hostUuid) {
+        return dashboardActive && request == integrationPanelRequest.get() &&
+                modalLayer != null && modalLayer.getVisibility() == View.VISIBLE &&
+                selectedHost != null && hostUuid.equals(selectedHost.uuid);
+    }
+
+    private void showPairingDialog(Host host) {
+        EditText code = new EditText(this);
+        code.setSingleLine(true);
+        code.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        code.setHint("6-digit code");
+        code.setTextColor(Color.WHITE);
+        code.setHintTextColor(0xFF9298AD);
+        code.setPadding(dp(20), dp(12), dp(20), dp(12));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Pair " + host.name)
+                .setMessage("Enter the code displayed by Start-WakePlayGateway.ps1 on the host PC.")
+                .setView(code)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Pair", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String value = code.getText().toString().trim();
+                    if (!value.matches("[0-9]{6}")) {
+                        code.setError("Enter six digits");
+                        return;
+                    }
+                    dialog.dismiss();
+                    beginGatewayPairing(host, value);
+                }));
+        dialog.show();
+    }
+
+    private void beginGatewayPairing(Host host, String code) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Pairing securely with " + host.address + "…");
+        TextView openAction = panelAction("OPEN HOST INTEGRATIONS");
+        TextView closeAction = panelAction("CLOSE");
+        openAction.setVisibility(View.GONE);
+        openAction.setOnClickListener(v -> showIntegrationsPanel());
+        closeAction.setOnClickListener(v -> hideSidePanel(true));
+        showSidePanel("HOST INTEGRATIONS", "Pairing", null,
+                this::showIntegrationsPanel, status, openAction, closeAction);
+        String endpoint = HostGatewayClient.endpointForHost(host.address);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.Pairing pairing = hostGatewayClient.pair(endpoint, code, "Wake & Play Android TV");
+                hostGatewayStore.save(host.uuid, pairing.connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Paired successfully. The host certificate has been pinned to this TV.");
+                    openAction.setVisibility(View.VISIBLE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Pairing failed\n" + friendlyGatewayError(error));
+                });
+            }
+        });
+    }
+
+    private void confirmForgetGateway(Host host) {
+        TextView cancel = panelAction("CANCEL");
+        TextView confirm = panelAction("FORGET GATEWAY");
+        cancel.setOnClickListener(v -> showIntegrationsPanel());
+        confirm.setOnClickListener(v -> {
+            integrationPanelRequest.incrementAndGet();
+            hostGatewayStore.remove(host.uuid);
+            showIntegrationsPanel();
+        });
+        showSidePanel("HOST INTEGRATIONS", "Forget paired gateway?",
+                "Wake & Play will delete the local client token and certificate pin. " +
+                        "The host can be paired again with a new code.",
+                this::showIntegrationsPanel, cancel, confirm);
+    }
+
+    private void showVibepolloFixPanel(Host host, HostGatewayClient.Connection connection) {
+        clearDiscordControllerShortcuts();
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Loading Vibepollo status…");
+        TextView restart = panelAction("RESTART VIBEPOLLO");
+        TextView resetDisplay = panelAction("RESET REMEMBERED DISPLAY");
+        TextView exportLogs = panelAction("EXPORT VIBEPOLLO LOGS");
+        TextView refresh = panelAction("REFRESH STATUS");
+        restart.setOnClickListener(v -> confirmVibepolloAction(host, connection, "restart",
+                "Restart Vibepollo?", "The active host service will be restarted. An active stream may be interrupted."));
+        resetDisplay.setOnClickListener(v -> confirmVibepolloAction(host, connection, "reset-display",
+                "Reset remembered display?", "Vibepollo will forget its persisted display choice and select it again on the next session."));
+        exportLogs.setOnClickListener(v -> runVibepolloAction(host, connection, "export-logs", "Exporting Vibepollo logs…"));
+        refresh.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
+        showSidePanel("VIBEPOLLO FIX", host.name,
+                "Repair actions run on the paired host. Restart and display reset always require confirmation.",
+                this::showIntegrationsPanel, status, restart, resetDisplay, exportLogs, refresh);
+
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.RepairStatus repair = hostGatewayClient.getVibepolloRepairStatus(connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    StringBuilder value = new StringBuilder(repair.online ? "Vibepollo online" : "Vibepollo API unavailable");
+                    if (!repair.version.isEmpty()) value.append("\nVersion ").append(repair.version);
+                    if (!repair.error.isEmpty()) value.append("\nLast API error: ").append(repair.error);
+                    status.setText(value.toString());
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Unable to load Vibepollo status\n" + friendlyGatewayError(error));
+                });
+            }
+        });
+    }
+
+    private void confirmVibepolloAction(Host host, HostGatewayClient.Connection connection,
+                                        String action, String title, String warning) {
+        TextView cancel = panelAction("CANCEL");
+        TextView confirm = panelAction("CONFIRM");
+        cancel.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
+        confirm.setOnClickListener(v -> runVibepolloAction(host, connection, action, title + "…"));
+        showSidePanel("VIBEPOLLO FIX", title, warning,
+                () -> showVibepolloFixPanel(host, connection), cancel, confirm);
+    }
+
+    private void runVibepolloAction(Host host, HostGatewayClient.Connection connection,
+                                     String action, String progress) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus(progress);
+        TextView back = panelAction("BACK TO VIBEPOLLO FIX");
+        TextView close = panelAction("CLOSE");
+        back.setVisibility(View.GONE);
+        back.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
+        close.setOnClickListener(v -> hideSidePanel(true));
+        showSidePanel("VIBEPOLLO FIX", "Host operation", null,
+                () -> showVibepolloFixPanel(host, connection), status, back, close);
+        executor.submit(() -> {
+            try {
+                hostGatewayClient.runVibepolloRepair(connection, action);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Operation completed successfully.");
+                    back.setVisibility(View.VISIBLE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Operation failed\n" + friendlyGatewayError(error));
+                    back.setVisibility(View.VISIBLE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            }
+        });
+    }
+
+    private void maybePrepareDiscordForStream(Host host) {
+        String profileKey = host == null || host.uuid == null ? null :
+                host.uuid + ":" + HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID;
+        if (host == null || host.uuid == null ||
+                !hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid) ||
+                !discordAutoConnectAttempted.add(profileKey)) return;
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) return;
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordStatus status = hostGatewayClient.getDiscordStatus(connection);
+                if (!status.bridgeOnline) return;
+                if (!status.rpcConnected) {
+                    hostGatewayClient.startDiscord(connection);
+                    for (int attempt = 0; attempt < 8 && !status.rpcConnected; attempt++) {
+                        Thread.sleep(attempt == 0 ? 3_000 : 750);
+                        status = hostGatewayClient.getDiscordStatus(connection);
+                    }
+                }
+                if (status.rpcConnected && !status.authenticated) {
+                    hostGatewayClient.connectDiscord(connection, false);
+                    status = hostGatewayClient.getDiscordStatus(connection);
+                }
+                HostGatewayStore.DiscordChannelSelection lastChannel =
+                        hostGatewayStore.loadLastDiscordChannel(host.uuid);
+                if (status.authenticated &&
+                        hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid) &&
+                        lastChannel != null) {
+                    hostGatewayClient.joinDiscordChannel(connection,
+                            lastChannel.channelId, lastChannel.guildId,
+                            lastChannel.guildName, lastChannel.channelName);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } catch (IOException error) {
+                Log.w(TAG, "Discord auto-connect failed for " + host.uuid, error);
+            }
+        });
+    }
+
+    private void showDiscordPanel(Host host, HostGatewayClient.Connection connection,
+                                  Runnable exitAction) {
+        communityExitAction = exitAction;
+        showDiscordPanel(host, connection);
+    }
+
+    private void showDiscordPanel(Host host, HostGatewayClient.Connection connection) {
+        Runnable exitAction = communityExitAction != null
+                ? communityExitAction : () -> hideSidePanel(true);
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Discord Bridge: checking…");
+        TextView voice = panelStatus("Voice channel: checking…");
+        TextView quickMute = panelAction("□ / X  MUTE MICROPHONE");
+        TextView quickLeave = panelAction("△ / Y  LEAVE VOICE");
+        LinearLayout voiceRow = panelActionRow(quickMute, quickLeave);
+        voiceRow.setVisibility(View.GONE);
+        TextView quickLabel = panelStatus("RECENT VOICE CHANNELS");
+        quickLabel.setVisibility(View.GONE);
+        TextView[] quickChannels = new TextView[]{
+                panelAction("CHANNEL 1"), panelAction("CHANNEL 2")};
+        for (TextView quick : quickChannels) quick.setVisibility(View.GONE);
+        LinearLayout quickRow = panelActionRow(quickChannels[0], quickChannels[1]);
+        quickRow.setVisibility(View.GONE);
+        TextView saved = panelAction("★  SAVED CHANNELS");
+        TextView servers = panelAction("▦  ALL SERVERS");
+        TextView people = panelAction("PEOPLE");
+        people.setVisibility(View.GONE);
+        TextView voiceControls = panelAction("◉  VOICE CONTROLS");
+        TextView virtualHere = panelAction("USB  DEVICES");
+        TextView settings = panelAction("⚙  SETTINGS");
+
+        quickMute.setOnClickListener(v -> runDiscordControllerShortcut(false));
+        quickLeave.setOnClickListener(v -> runDiscordControllerShortcut(true));
+        saved.setOnClickListener(v -> showDiscordSavedChannelsPanel(host, connection, false));
+        servers.setOnClickListener(v -> showDiscordServersPanel(host, connection, false));
+        people.setOnClickListener(v -> showDiscordParticipantsPanel(host, connection, true));
+        voiceControls.setOnClickListener(v -> showDiscordVoiceControlsPanel(host, connection));
+        virtualHere.setOnClickListener(v -> showVirtualHerePanel(host, connection, false));
+        settings.setOnClickListener(v -> showDiscordSettingsPanel(host, connection));
+
+        showSidePanel("DISCORD", host.name, null,
+                exitAction,
+                status, voiceRow, quickRow,
+                panelActionRow(saved, servers),
+                panelActionRow(people, voiceControls),
+                panelActionRow(virtualHere, settings));
+        activateDiscordControllerShortcuts(host, connection, status,
+                quickMute, quickLeave);
+
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordStatus discord = hostGatewayClient.getDiscordStatus(connection);
+                HostGatewayClient.DiscordVoice loadedVoice = null;
+                HostGatewayClient.DiscordHome loadedHome = null;
+                if (discord.authenticated) {
+                    try {
+                        loadedVoice = hostGatewayClient.getDiscordVoice(connection, false);
+                    } catch (IOException error) {
+                        Log.w(TAG, "Unable to load Discord voice state", error);
+                    }
+                    try {
+                        loadedHome = hostGatewayClient.getDiscordHome(connection, false);
+                    } catch (IOException error) {
+                        Log.w(TAG, "Unable to load Discord shortcuts", error);
+                    }
+                }
+                HostGatewayClient.DiscordVoice currentVoice = loadedVoice;
+                HostGatewayClient.DiscordHome home = loadedHome;
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    if (!discord.bridgeOnline) {
+                        status.setText("Discord Bridge: offline" +
+                                (discord.error.isEmpty() ? "" : "\n" + discord.error));
+                    } else if (!discord.rpcConnected) {
+                        status.setText("Discord Bridge: online\n" +
+                                discordUnavailableMessage(discord));
+                    } else if (!discord.authenticated) {
+                        status.setText("Discord Bridge: online\nDiscord RPC: authorization required");
+                    } else {
+                        status.setText("ONLINE  ·  Discord connected");
+                    }
+                    if (currentVoice == null || !currentVoice.connected) {
+                        voice.setText("Voice channel: not connected");
+                        if (discord.authenticated) {
+                            status.setText("ONLINE  ·  Voice not connected");
+                        }
+                        voiceRow.setVisibility(View.GONE);
+                        updateDiscordShortcutVoice(null);
+                    } else {
+                        voice.setText("◉  " + currentVoice.channelName +
+                                "  ·  " + currentVoice.participants + " participant" +
+                                (currentVoice.participants == 1 ? "" : "s"));
+                        status.setText("ONLINE  ·  " + currentVoice.channelName +
+                                "  ·  " + currentVoice.participants + " participant" +
+                                (currentVoice.participants == 1 ? "" : "s"));
+                        hostGatewayStore.saveLastDiscordChannel(host.uuid,
+                                currentVoice.channelId, currentVoice.guildId, "",
+                                currentVoice.channelName);
+                        voiceRow.setVisibility(View.VISIBLE);
+                        people.setText("PEOPLE  ·  " + currentVoice.participants);
+                        people.setVisibility(View.VISIBLE);
+                        updateDiscordShortcutVoice(currentVoice);
+                    }
+
+                    if (home != null) {
+                        List<HostGatewayClient.DiscordChannel> shortcuts = new ArrayList<>();
+                        Set<String> seen = new HashSet<>();
+                        for (HostGatewayClient.DiscordChannel channel : home.favorites) {
+                            if (seen.add(channel.id)) shortcuts.add(channel);
+                        }
+                        for (HostGatewayClient.DiscordChannel channel : home.recent) {
+                            if (seen.add(channel.id)) shortcuts.add(channel);
+                        }
+                        int count = Math.min(quickChannels.length, shortcuts.size());
+                        for (int index = 0; index < count; index++) {
+                            HostGatewayClient.DiscordChannel channel = shortcuts.get(index);
+                            TextView quick = quickChannels[index];
+                            String peopleSuffix = channel.people > 0
+                                    ? "  ·  " + channel.people + " online" : "";
+                            quick.setText((channel.favorite ? "★  " : "◉  ") +
+                                    channel.name + peopleSuffix);
+                            quick.setOnClickListener(v -> runDiscordOperation(host, connection,
+                                    "Joining " + channel.name + "…",
+                                    "Connected to " + channel.name + ".",
+                                    () -> showDiscordPanel(host, connection),
+                                    () -> joinDiscordChannelAndRemember(host, connection, channel)));
+                            quick.setVisibility(View.VISIBLE);
+                        }
+                        quickLabel.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+                        quickRow.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+                        rebuildSidePanelFocusNavigation();
+                    } else {
+                        quickLabel.setVisibility(View.GONE);
+                        quickRow.setVisibility(View.GONE);
+                    }
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Discord unavailable\n" + friendlyGatewayError(error));
+                });
+            }
+        });
+    }
+
+    private void showDiscordVoiceControlsPanel(Host host,
+                                                HostGatewayClient.Connection connection) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Voice channel: checking…");
+        TextView mute = panelAction("MICROPHONE  ·  CHECKING");
+        TextView deafen = panelAction("HEADPHONES  ·  CHECKING");
+        TextView leave = panelAction("LEAVE VOICE CHANNEL");
+        TextView audio = panelAction("AUDIO DEVICES");
+        TextView refresh = panelAction("REFRESH VOICE STATUS");
+        TextView back = panelAction("BACK TO DISCORD");
+        Runnable parent = () -> showDiscordPanel(host, connection);
+
+        mute.setOnClickListener(v -> runDiscordOperation(host, connection,
+                "Toggling microphone…", "Microphone state changed.",
+                () -> showDiscordVoiceControlsPanel(host, connection),
+                () -> hostGatewayClient.setDiscordVoiceFlag(connection, "mute", "toggle")));
+        deafen.setOnClickListener(v -> runDiscordOperation(host, connection,
+                "Toggling headphones…", "Headphone state changed.",
+                () -> showDiscordVoiceControlsPanel(host, connection),
+                () -> hostGatewayClient.setDiscordVoiceFlag(connection, "deafen", "toggle")));
+        leave.setOnClickListener(v -> runDiscordOperation(host, connection,
+                "Leaving the voice channel…", "Voice channel disconnected.",
+                () -> showDiscordVoiceControlsPanel(host, connection),
+                () -> hostGatewayClient.leaveDiscordChannel(connection)));
+        audio.setOnClickListener(v -> showDiscordAudioPanel(host, connection));
+        refresh.setOnClickListener(v -> showDiscordVoiceControlsPanel(host, connection));
+        back.setOnClickListener(v -> parent.run());
+
+        showSidePanel("DISCORD", "Voice controls", null, parent,
+                status, panelActionRow(mute, deafen),
+                panelActionRow(leave, audio), panelActionRow(refresh, back));
+        activateDiscordControllerShortcuts(host, connection, status, mute, leave);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordVoice current =
+                        hostGatewayClient.getDiscordVoice(connection, false);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    if (!current.connected) {
+                        status.setText("Voice channel: not connected");
+                        mute.setText("MICROPHONE  ·  UNAVAILABLE");
+                        deafen.setText("HEADPHONES  ·  UNAVAILABLE");
+                        updateDiscordShortcutVoice(null);
+                    } else {
+                        status.setText("Voice channel: " + current.channelName +
+                                "\nParticipants: " + current.participants);
+                        mute.setText("MICROPHONE  ·  " + (current.muted ? "MUTED" : "ON"));
+                        deafen.setText("HEADPHONES  ·  " + (current.deafened ? "DEAFENED" : "ON"));
+                        hostGatewayStore.saveLastDiscordChannel(host.uuid,
+                                current.channelId, current.guildId, "", current.channelName);
+                        updateDiscordShortcutVoice(current);
+                    }
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Voice controls unavailable\n" + friendlyGatewayError(error));
+                    mute.setText("MICROPHONE  ·  UNAVAILABLE");
+                    deafen.setText("HEADPHONES  ·  UNAVAILABLE");
+                });
+            }
+        });
+    }
+
+    private void showDiscordAudioPanel(Host host,
+                                       HostGatewayClient.Connection connection) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView loading = panelStatus("Loading Discord and Windows audio devices…");
+        TextView back = panelAction("BACK TO VOICE CONTROLS");
+        back.setOnClickListener(v -> showDiscordVoiceControlsPanel(host, connection));
+        showSidePanel("DISCORD", "Audio devices", null,
+                () -> showDiscordVoiceControlsPanel(host, connection), loading, back);
+        activateDiscordControllerShortcuts(host, connection, null, null, null);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordAudioState audio =
+                        hostGatewayClient.getDiscordAudioState(connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    List<View> views = new ArrayList<>();
+                    int[] systemVolume = new int[]{audio.systemVolume};
+                    boolean[] systemMuted = new boolean[]{audio.systemMuted};
+                    TextView systemStatus = panelStatus("");
+                    updateSystemAudioStatus(systemStatus, audio.systemAvailable,
+                            systemVolume[0], systemMuted[0], audio.error);
+                    views.add(systemStatus);
+                    if (audio.systemAvailable) {
+                        TextView down = panelAction("−5");
+                        TextView up = panelAction("+5");
+                        TextView mute = panelAction(systemMuted[0] ? "UNMUTE" : "MUTE");
+                        AtomicBoolean busy = new AtomicBoolean(false);
+                        down.setOnClickListener(v -> runSystemAudioAction(request, host,
+                                connection, systemStatus, mute, systemVolume,
+                                systemMuted, busy, -5));
+                        up.setOnClickListener(v -> runSystemAudioAction(request, host,
+                                connection, systemStatus, mute, systemVolume,
+                                systemMuted, busy, 5));
+                        mute.setOnClickListener(v -> runSystemAudioAction(request, host,
+                                connection, systemStatus, mute, systemVolume,
+                                systemMuted, busy, 0));
+                        views.add(panelActionRow(down, up, mute));
+                    }
+                    addAudioDeviceActions(views, "DISCORD INPUT",
+                            audio.discordDevices, "input", host, connection);
+                    addAudioDeviceActions(views, "DISCORD OUTPUT",
+                            audio.discordDevices, "output", host, connection);
+                    addAudioDeviceActions(views, "WINDOWS INPUT",
+                            audio.systemDevices, "input", host, connection);
+                    addAudioDeviceActions(views, "WINDOWS OUTPUT",
+                            audio.systemDevices, "output", host, connection);
+                    TextView refresh = panelAction("REFRESH");
+                    TextView done = panelAction("BACK");
+                    refresh.setOnClickListener(v -> showDiscordAudioPanel(host, connection));
+                    done.setOnClickListener(v -> showDiscordVoiceControlsPanel(host, connection));
+                    views.add(panelActionRow(refresh, done));
+                    showSidePanel("DISCORD", "Audio devices", null,
+                            () -> showDiscordVoiceControlsPanel(host, connection),
+                            views.toArray(new View[0]));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    TextView failed = panelStatus("Audio devices unavailable\n" +
+                            friendlyGatewayError(error));
+                    TextView retry = panelAction("RETRY");
+                    TextView done = panelAction("BACK");
+                    retry.setOnClickListener(v -> showDiscordAudioPanel(host, connection));
+                    done.setOnClickListener(v -> showDiscordVoiceControlsPanel(host, connection));
+                    showSidePanel("DISCORD", "Audio devices", null,
+                            () -> showDiscordVoiceControlsPanel(host, connection),
+                            failed, panelActionRow(retry, done));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                });
+            }
+        });
+    }
+
+    private void addAudioDeviceActions(List<View> views, String label,
+                                       List<HostGatewayClient.AudioDevice> devices,
+                                       String flow, Host host,
+                                       HostGatewayClient.Connection connection) {
+        List<HostGatewayClient.AudioDevice> matching = new ArrayList<>();
+        for (HostGatewayClient.AudioDevice device : devices) {
+            if (flow.equals(device.flow)) matching.add(device);
+        }
+        if (matching.isEmpty()) return;
+        views.add(panelStatus(label));
+        for (HostGatewayClient.AudioDevice device : matching) {
+            TextView action = panelAction((device.current ? "✓  " : "") + device.name);
+            action.setOnClickListener(v -> {
+                if (device.current) {
+                    Toast.makeText(this, "This device is already selected.",
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    runDiscordAudioDeviceOperation(host, connection, device);
+                }
+            });
+            views.add(action);
+        }
+    }
+
+    private void runDiscordAudioDeviceOperation(Host host,
+                                                HostGatewayClient.Connection connection,
+                                                HostGatewayClient.AudioDevice device) {
+        executor.submit(() -> {
+            try {
+                hostGatewayClient.selectAudioDevice(connection, device);
+                mainHandler.post(() -> {
+                    Toast.makeText(this, "Selected " + device.name + ".",
+                            Toast.LENGTH_SHORT).show();
+                    showDiscordAudioPanel(host, connection);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> Toast.makeText(this,
+                        "Audio device: " + friendlyGatewayError(error),
+                        Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void updateSystemAudioStatus(TextView status, boolean available,
+                                         int volume, boolean muted, String error) {
+        status.setText(available
+                ? "WINDOWS VOLUME  ·  " + volume + "%" + (muted ? "  ·  MUTED" : "")
+                : "Windows audio unavailable" +
+                (error == null || error.isEmpty() ? "" : "\n" + error));
+    }
+
+    private void runSystemAudioAction(int request, Host host,
+                                      HostGatewayClient.Connection connection,
+                                      TextView status, TextView muteAction,
+                                      int[] volume, boolean[] muted,
+                                      AtomicBoolean busy, int delta) {
+        if (!busy.compareAndSet(false, true)) return;
+        executor.submit(() -> {
+            try {
+                if (delta == 0) hostGatewayClient.toggleSystemMute(connection);
+                else hostGatewayClient.changeSystemVolume(connection, delta);
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    if (delta == 0) muted[0] = !muted[0];
+                    else volume[0] = Math.max(0, Math.min(100, volume[0] + delta));
+                    updateSystemAudioStatus(status, true, volume[0], muted[0], "");
+                    muteAction.setText(muted[0] ? "UNMUTE" : "MUTE");
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    Toast.makeText(this, "Windows audio: " +
+                            friendlyGatewayError(error), Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void activateDiscordControllerShortcuts(
+            Host host, HostGatewayClient.Connection connection,
+            TextView voiceStatus, TextView muteAction, TextView leaveAction) {
+        discordShortcutHost = host;
+        discordShortcutConnection = connection;
+        discordShortcutVoiceStatus = voiceStatus;
+        discordShortcutMuteAction = muteAction;
+        discordShortcutLeaveAction = leaveAction;
+    }
+
+    private void showDiscordParticipantsPanel(Host host,
+                                               HostGatewayClient.Connection connection,
+                                               boolean force) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView loading = panelStatus("Loading people in the voice channel…");
+        TextView back = panelAction("BACK TO DISCORD");
+        back.setOnClickListener(v -> showDiscordPanel(host, connection));
+        showSidePanel("DISCORD", "People", null,
+                () -> showDiscordPanel(host, connection), loading, back);
+        activateDiscordControllerShortcuts(host, connection, null, null, null);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordVoice current =
+                        hostGatewayClient.getDiscordVoice(connection, force);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    List<View> views = new ArrayList<>();
+                    if (!current.connected) {
+                        views.add(panelStatus("Discord is not connected to a voice channel."));
+                    } else {
+                        views.add(panelStatus("◉  " + current.channelName + "  ·  " +
+                                current.participants + " participant" +
+                                (current.participants == 1 ? "" : "s")));
+                        for (HostGatewayClient.DiscordParticipant participant :
+                                current.participantList) {
+                            TextView person = panelStatus("");
+                            int[] volume = new int[]{participant.volume};
+                            boolean[] muted = new boolean[]{participant.muted};
+                            renderDiscordParticipantStatus(person, participant,
+                                    volume[0], muted[0]);
+                            views.add(person);
+                            if (participant.self) continue;
+                            SeekBar slider = panelVolumeSlider(volume[0]);
+                            TextView mute = panelAction(muted[0] ? "UNMUTE" : "MUTE");
+                            AtomicBoolean muteBusy = new AtomicBoolean(false);
+                            AtomicBoolean volumeBusy = new AtomicBoolean(false);
+                            AtomicInteger desiredVolume = new AtomicInteger(volume[0]);
+                            Runnable commitVolume = () -> queueDiscordParticipantVolume(
+                                    request, host, connection, participant, volume,
+                                    muted, person, desiredVolume, volumeBusy);
+                            slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                                @Override
+                                public void onProgressChanged(SeekBar seekBar, int progress,
+                                                              boolean fromUser) {
+                                    if (!fromUser) return;
+                                    int snapped = Math.max(0, Math.min(200,
+                                            Math.round(progress / 10f) * 10));
+                                    if (snapped != progress) seekBar.setProgress(snapped);
+                                    volume[0] = snapped;
+                                    desiredVolume.set(snapped);
+                                    renderDiscordParticipantStatus(person, participant,
+                                            volume[0], muted[0]);
+                                }
+
+                                @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+
+                                @Override
+                                public void onStopTrackingTouch(SeekBar seekBar) {
+                                    commitVolume.run();
+                                }
+                            });
+                            slider.setOnKeyListener((v, keyCode, event) -> {
+                                if (event.getAction() == KeyEvent.ACTION_UP &&
+                                        (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                                                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                                    commitVolume.run();
+                                }
+                                return false;
+                            });
+                            mute.setOnClickListener(v -> runDiscordParticipantAction(
+                                    request, host, connection, participant, volume, muted,
+                                    person, mute, muteBusy, 0));
+                            views.add(panelWeightedActionRow(slider, mute));
+                        }
+                    }
+                    TextView refresh = panelAction("REFRESH");
+                    TextView done = panelAction("BACK");
+                    refresh.setOnClickListener(v -> showDiscordParticipantsPanel(
+                            host, connection, true));
+                    done.setOnClickListener(v -> showDiscordPanel(host, connection));
+                    views.add(panelActionRow(refresh, done));
+                    showSidePanel("DISCORD", "People", null,
+                            () -> showDiscordPanel(host, connection),
+                            views.toArray(new View[0]));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                    updateDiscordShortcutVoice(current);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    TextView failed = panelStatus("People unavailable\n" +
+                            friendlyGatewayError(error));
+                    TextView retry = panelAction("RETRY");
+                    TextView done = panelAction("BACK");
+                    retry.setOnClickListener(v -> showDiscordParticipantsPanel(
+                            host, connection, true));
+                    done.setOnClickListener(v -> showDiscordPanel(host, connection));
+                    showSidePanel("DISCORD", "People", null,
+                            () -> showDiscordPanel(host, connection),
+                            failed, panelActionRow(retry, done));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                });
+            }
+        });
+    }
+
+    private void renderDiscordParticipantStatus(TextView view,
+                                                HostGatewayClient.DiscordParticipant participant,
+                                                int volume, boolean muted) {
+        view.setText((participant.speaking ? "▶  " : "●  ") + participant.name +
+                (participant.self ? "  ·  YOU" : "  ·  " + volume + "%") +
+                (muted ? "  ·  MUTED" : ""));
+        view.setTextColor(participant.speaking ? 0xFF69F0AE : 0xFFC1C5D6);
+    }
+
+    private void runDiscordParticipantAction(
+            int request, Host host, HostGatewayClient.Connection connection,
+            HostGatewayClient.DiscordParticipant participant,
+            int[] volume, boolean[] muted, TextView status, TextView muteAction,
+            AtomicBoolean busy, int delta) {
+        if (!busy.compareAndSet(false, true)) return;
+        executor.submit(() -> {
+            try {
+                if (delta == 0) {
+                    hostGatewayClient.toggleDiscordParticipantMute(connection, participant.id);
+                } else {
+                    hostGatewayClient.changeDiscordParticipantVolume(
+                            connection, participant.id, delta);
+                }
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    if (delta == 0) muted[0] = !muted[0];
+                    else volume[0] = Math.max(0, Math.min(200, volume[0] + delta));
+                    renderDiscordParticipantStatus(status, participant,
+                            volume[0], muted[0]);
+                    muteAction.setText(muted[0] ? "UNMUTE" : "MUTE");
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    Toast.makeText(this, "Discord user control: " +
+                                    friendlyGatewayError(error),
+                            Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void queueDiscordParticipantVolume(
+            int request, Host host, HostGatewayClient.Connection connection,
+            HostGatewayClient.DiscordParticipant participant,
+            int[] volume, boolean[] muted, TextView status,
+            AtomicInteger desiredVolume, AtomicBoolean busy) {
+        if (!busy.compareAndSet(false, true)) return;
+        executor.submit(() -> {
+            int sent = -1;
+            try {
+                do {
+                    sent = desiredVolume.get();
+                    hostGatewayClient.setDiscordParticipantVolume(
+                            connection, participant.id, sent);
+                } while (desiredVolume.get() != sent);
+                int applied = sent;
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    volume[0] = applied;
+                    renderDiscordParticipantStatus(status, participant,
+                            volume[0], muted[0]);
+                    if (desiredVolume.get() != applied) {
+                        queueDiscordParticipantVolume(request, host, connection,
+                                participant, volume, muted, status,
+                                desiredVolume, busy);
+                    }
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    busy.set(false);
+                    Toast.makeText(this, "Discord user volume: " +
+                                    friendlyGatewayError(error),
+                            Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void clearDiscordControllerShortcuts() {
+        discordShortcutHost = null;
+        discordShortcutConnection = null;
+        discordShortcutVoiceStatus = null;
+        discordShortcutMuteAction = null;
+        discordShortcutLeaveAction = null;
+        discordShortcutVoiceConnected = false;
+        discordShortcutMuted = false;
+    }
+
+    private void updateDiscordShortcutVoice(HostGatewayClient.DiscordVoice voice) {
+        discordShortcutVoiceConnected = voice != null && voice.connected;
+        discordShortcutMuted = discordShortcutVoiceConnected && voice.muted;
+        if (discordShortcutMuteAction != null &&
+                discordShortcutMuteAction.isAttachedToWindow()) {
+            discordShortcutMuteAction.setText(discordShortcutVoiceConnected
+                    ? "□ / X  " + (discordShortcutMuted ? "UNMUTE" : "MUTE MICROPHONE")
+                    : "□ / X  MICROPHONE UNAVAILABLE");
+        }
+        if (discordShortcutLeaveAction != null &&
+                discordShortcutLeaveAction.isAttachedToWindow()) {
+            discordShortcutLeaveAction.setText("△ / Y  LEAVE VOICE");
+        }
+    }
+
+    private void runDiscordControllerShortcut(boolean leaveVoice) {
+        Host host = discordShortcutHost;
+        HostGatewayClient.Connection connection = discordShortcutConnection;
+        if (host == null || connection == null) return;
+        if (!discordShortcutVoiceConnected) {
+            Toast.makeText(this, "Discord is not connected to a voice channel.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordVoice updated;
+                if (leaveVoice) {
+                    hostGatewayClient.leaveDiscordChannel(connection);
+                    updated = null;
+                } else {
+                    hostGatewayClient.setDiscordVoiceFlag(connection, "mute", "toggle");
+                    updated = hostGatewayClient.getDiscordVoice(connection, true);
+                }
+                HostGatewayClient.DiscordVoice result = updated;
+                mainHandler.post(() -> {
+                    if (discordShortcutConnection != connection) return;
+                    updateDiscordShortcutVoice(result);
+                    if (discordShortcutVoiceStatus != null &&
+                            discordShortcutVoiceStatus.isAttachedToWindow()) {
+                        if (result == null || !result.connected) {
+                            discordShortcutVoiceStatus.setText("Voice channel: not connected");
+                        } else {
+                            discordShortcutVoiceStatus.setText("◉  " + result.channelName +
+                                    "  ·  " + (result.muted ? "microphone muted" :
+                                    result.participants + " participant" +
+                                            (result.participants == 1 ? "" : "s")));
+                        }
+                    }
+                    Toast.makeText(this, leaveVoice ? "Left Discord voice." :
+                                    (discordShortcutMuted ? "Microphone muted." : "Microphone on."),
+                            Toast.LENGTH_SHORT).show();
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> Toast.makeText(this,
+                        "Discord shortcut failed: " + friendlyGatewayError(error),
+                        Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void showVirtualHerePanel(Host host,
+                                      HostGatewayClient.Connection connection,
+                                      boolean force) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView loading = panelStatus("Loading USB devices…");
+        TextView back = panelAction("BACK TO DISCORD");
+        back.setOnClickListener(v -> showDiscordPanel(host, connection));
+        showSidePanel("VIRTUALHERE", "USB devices",
+                "Connect host USB devices without leaving Wake & Play.",
+                () -> showDiscordPanel(host, connection), loading, back);
+        activateDiscordControllerShortcuts(host, connection, null, null, null);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.VirtualHereState state =
+                        hostGatewayClient.getVirtualHereState(connection, force);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    List<View> actions = new ArrayList<>();
+                    String summary = state.installed
+                            ? state.running ? "VirtualHere client: online" :
+                            "VirtualHere client: not running"
+                            : "VirtualHere client: not installed";
+                    if (!state.error.isEmpty()) summary += "\n" + state.error;
+                    actions.add(panelStatus(summary));
+                    int deviceCount = 0;
+                    for (HostGatewayClient.VirtualHereServer server : state.servers) {
+                        actions.add(panelStatus("SERVER  ·  " +
+                                (!server.name.isEmpty() ? server.name : server.hostname)));
+                        for (HostGatewayClient.VirtualHereDevice device : server.devices) {
+                            deviceCount++;
+                            String stateLabel = device.inUseByMe ? "CONNECTED" :
+                                    device.available ? "AVAILABLE" :
+                                    device.inUse ? "IN USE" : "OFFLINE";
+                            TextView use = panelAction((device.inUseByMe ? "■  " : "USB  ") +
+                                    device.name + "  ·  " + stateLabel);
+                            TextView auto = panelAction(device.autoUse ?
+                                    "AUTO  ·  ON" : "AUTO USE");
+                            if (device.inUseByMe) {
+                                use.setOnClickListener(v -> runVirtualHereOperation(host,
+                                        connection, "stop", device.address,
+                                        "Disconnecting " + device.name + "…"));
+                            } else if (device.available) {
+                                use.setOnClickListener(v -> runVirtualHereOperation(host,
+                                        connection, "use", device.address,
+                                        "Connecting " + device.name + "…"));
+                            } else {
+                                use.setOnClickListener(v -> Toast.makeText(this,
+                                        device.boundHostname.isEmpty()
+                                                ? "This USB device is unavailable."
+                                                : "In use by " + device.boundHostname + ".",
+                                        Toast.LENGTH_LONG).show());
+                            }
+                            auto.setOnClickListener(v -> {
+                                if (device.autoUse) {
+                                    Toast.makeText(this, "Auto use is already enabled.",
+                                            Toast.LENGTH_SHORT).show();
+                                } else {
+                                    runVirtualHereOperation(host, connection, "auto",
+                                            device.address,
+                                            "Enabling auto use for " + device.name + "…");
+                                }
+                            });
+                            actions.add(panelActionRow(use, auto));
+                        }
+                    }
+                    if (deviceCount == 0) {
+                        actions.add(panelStatus("No USB devices are currently advertised by a VirtualHere server."));
+                    }
+                    TextView restart = panelAction("RESTART VIRTUALHERE");
+                    TextView refresh = panelAction("REFRESH");
+                    TextView done = panelAction("BACK");
+                    restart.setOnClickListener(v -> runVirtualHereOperation(host,
+                            connection, "restart", null, "Restarting VirtualHere…"));
+                    refresh.setOnClickListener(v -> showVirtualHerePanel(host, connection, true));
+                    done.setOnClickListener(v -> showDiscordPanel(host, connection));
+                    actions.add(panelActionRow(restart, refresh));
+                    actions.add(done);
+                    showSidePanel("VIRTUALHERE", "USB devices", null,
+                            () -> showDiscordPanel(host, connection),
+                            actions.toArray(new View[0]));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    TextView failed = panelStatus("VirtualHere unavailable\n" +
+                            friendlyGatewayError(error));
+                    TextView retry = panelAction("RETRY");
+                    TextView done = panelAction("BACK TO DISCORD");
+                    retry.setOnClickListener(v -> showVirtualHerePanel(host, connection, true));
+                    done.setOnClickListener(v -> showDiscordPanel(host, connection));
+                    showSidePanel("VIRTUALHERE", "USB devices", null,
+                            () -> showDiscordPanel(host, connection),
+                            failed, panelActionRow(retry, done));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
+                });
+            }
+        });
+    }
+
+    private void runVirtualHereOperation(Host host,
+                                         HostGatewayClient.Connection connection,
+                                         String action, String address,
+                                         String progress) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus(progress);
+        showSidePanel("VIRTUALHERE", "USB devices", null,
+                () -> showVirtualHerePanel(host, connection, true), status);
+        activateDiscordControllerShortcuts(host, connection, null, null, null);
+        executor.submit(() -> {
+            try {
+                hostGatewayClient.runVirtualHereAction(connection, action, address);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    showVirtualHerePanel(host, connection, true);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    Toast.makeText(this, "VirtualHere: " + friendlyGatewayError(error),
+                            Toast.LENGTH_LONG).show();
+                    showVirtualHerePanel(host, connection, true);
+                });
+            }
+        });
+    }
+
+    private void showDiscordSettingsPanel(Host host,
+                                          HostGatewayClient.Connection connection) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Discord profile: checking…");
+        boolean autoConnectEnabled = hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid);
+        HostGatewayStore.DiscordChannelSelection lastChannel =
+                hostGatewayStore.loadLastDiscordChannel(host.uuid);
+        boolean autoJoinEnabled = hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid);
+        TextView autoConnect = panelAction("START DISCORD WITH STREAM  ·  " +
+                (autoConnectEnabled ? "ON" : "OFF"));
+        TextView lastChannelStatus = panelStatus("Last voice channel: " +
+                (lastChannel != null ? lastChannel.channelName : "not recorded yet"));
+        TextView autoJoin = panelAction("AUTO-JOIN LAST CHANNEL  ·  " +
+                (lastChannel == null ? "UNAVAILABLE" : autoJoinEnabled ? "ON" : "OFF"));
+        TextView start = panelAction("START DISCORD ON HOST");
+        TextView connect = panelAction("CONNECT / AUTHORIZE RPC");
+        TextView refresh = panelAction("REFRESH PROFILE STATUS");
+        TextView back = panelAction("BACK TO DISCORD");
+        Runnable parent = () -> showDiscordPanel(host, connection);
+
+        autoConnect.setOnClickListener(v -> {
+            boolean enabled = !hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid);
+            hostGatewayStore.setDiscordAutoConnectEnabled(host.uuid, enabled);
+            autoConnect.setText("START DISCORD WITH STREAM  ·  " + (enabled ? "ON" : "OFF"));
+            lastChannelStatus.setVisibility(enabled ? View.VISIBLE : View.GONE);
+            autoJoin.setVisibility(enabled ? View.VISIBLE : View.GONE);
+            rebuildSidePanelFocusNavigation();
+            if (enabled) {
+                discordAutoConnectAttempted.remove(
+                        host.uuid + ":" + HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID);
+            }
+        });
+        autoJoin.setOnClickListener(v -> {
+            if (lastChannel == null) {
+                Toast.makeText(this,
+                        "Join a Discord voice channel once to remember it.",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            boolean enabled = !hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid);
+            hostGatewayStore.setDiscordAutoJoinLastEnabled(host.uuid, enabled);
+            autoJoin.setText("AUTO-JOIN LAST CHANNEL  ·  " + (enabled ? "ON" : "OFF"));
+        });
+        start.setOnClickListener(v -> runDiscordOperation(host, connection,
+                "Starting Discord in the Bridge profile…", "Discord start requested.",
+                () -> showDiscordSettingsPanel(host, connection),
+                () -> hostGatewayClient.startDiscord(connection)));
+        connect.setOnClickListener(v -> runDiscordOperation(host, connection,
+                "Connecting Discord RPC…", "Discord RPC connected.",
+                () -> showDiscordSettingsPanel(host, connection),
+                () -> hostGatewayClient.connectDiscord(connection, false)));
+        refresh.setOnClickListener(v -> showDiscordSettingsPanel(host, connection));
+        back.setOnClickListener(v -> parent.run());
+        lastChannelStatus.setVisibility(autoConnectEnabled ? View.VISIBLE : View.GONE);
+        autoJoin.setVisibility(autoConnectEnabled ? View.VISIBLE : View.GONE);
+        showSidePanel("DISCORD", "Settings",
+                "Automation applies to the selected host and Discord profile.",
+                parent, status, autoConnect, lastChannelStatus, autoJoin,
+                start, connect, refresh, back);
+
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordStatus discord = hostGatewayClient.getDiscordStatus(connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    if (!discord.bridgeOnline) {
+                        status.setText("Bridge profile: offline" +
+                                (discord.error.isEmpty() ? "" : "\n" + discord.error));
+                    } else if (!discord.rpcConnected) {
+                        status.setText("Bridge profile: online\n" +
+                                discordUnavailableMessage(discord));
+                    } else if (!discord.authenticated) {
+                        status.setText("Bridge profile: online\nDiscord RPC: authorization required");
+                    } else {
+                        status.setText("Bridge profile: online\nDiscord RPC: authenticated");
+                    }
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Profile status unavailable\n" + friendlyGatewayError(error));
+                });
+            }
+        });
+    }
+
+    private void showDiscordSavedChannelsPanel(Host host,
+                                                HostGatewayClient.Connection connection,
+                                                boolean force) {
+        int request = showDiscordLoadingPanel(host, "FAVORITES & RECENT",
+                "Loading saved channels…", () -> showDiscordPanel(host, connection));
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordHome home = hostGatewayClient.getDiscordHome(connection, force);
+                List<HostGatewayClient.DiscordChannel> channels = new ArrayList<>();
+                Set<String> seen = new HashSet<>();
+                for (HostGatewayClient.DiscordChannel channel : home.favorites) {
+                    if (seen.add(channel.id)) channels.add(channel);
+                }
+                for (HostGatewayClient.DiscordChannel channel : home.recent) {
+                    if (seen.add(channel.id)) channels.add(channel);
+                }
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    renderDiscordChannels(host, connection, "FAVORITES & RECENT",
+                            "Saved voice channels for " + host.name + ".", channels,
+                            () -> showDiscordSavedChannelsPanel(host, connection, true),
+                            () -> showDiscordPanel(host, connection));
+                });
+            } catch (IOException error) {
+                showDiscordLoadError(request, host, "FAVORITES & RECENT", error,
+                        () -> showDiscordSavedChannelsPanel(host, connection, true),
+                        () -> showDiscordPanel(host, connection));
+            }
+        });
+    }
+
+    private void showDiscordServersPanel(Host host, HostGatewayClient.Connection connection,
+                                         boolean force) {
+        int request = showDiscordLoadingPanel(host, "DISCORD SERVERS",
+                "Loading servers…", () -> showDiscordPanel(host, connection));
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordHome home = hostGatewayClient.getDiscordHome(connection, force);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    List<View> actions = new ArrayList<>();
+                    if (home.guilds.isEmpty()) {
+                        actions.add(panelStatus("No Discord servers are available for this account."));
+                    } else {
+                        for (HostGatewayClient.DiscordGuild guild : home.guilds) {
+                            TextView action = panelAction(guild.name + "  ›");
+                            action.setOnClickListener(v -> showDiscordChannelsPanel(
+                                    host, connection, guild, false));
+                            actions.add(action);
+                        }
+                    }
+                    TextView refresh = panelAction("REFRESH SERVERS");
+                    TextView back = panelAction("BACK TO DISCORD");
+                    refresh.setOnClickListener(v -> showDiscordServersPanel(host, connection, true));
+                    back.setOnClickListener(v -> showDiscordPanel(host, connection));
+                    actions.add(refresh);
+                    actions.add(back);
+                    showSidePanel("DISCORD", "Servers",
+                            "Select a server to show its voice and stage channels.",
+                            () -> showDiscordPanel(host, connection),
+                            actions.toArray(new View[0]));
+                });
+            } catch (IOException error) {
+                showDiscordLoadError(request, host, "DISCORD SERVERS", error,
+                        () -> showDiscordServersPanel(host, connection, true),
+                        () -> showDiscordPanel(host, connection));
+            }
+        });
+    }
+
+    private void showDiscordChannelsPanel(Host host, HostGatewayClient.Connection connection,
+                                          HostGatewayClient.DiscordGuild guild, boolean force) {
+        int request = showDiscordLoadingPanel(host, guild.name,
+                "Loading voice channels…", () -> showDiscordServersPanel(host, connection, false));
+        executor.submit(() -> {
+            try {
+                List<HostGatewayClient.DiscordChannel> channels =
+                        hostGatewayClient.getDiscordChannels(connection, guild, force);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    renderDiscordChannels(host, connection, guild.name,
+                            "Voice and stage channels.", channels,
+                            () -> showDiscordChannelsPanel(host, connection, guild, true),
+                            () -> showDiscordServersPanel(host, connection, false));
+                });
+            } catch (IOException error) {
+                showDiscordLoadError(request, host, guild.name, error,
+                        () -> showDiscordChannelsPanel(host, connection, guild, true),
+                        () -> showDiscordServersPanel(host, connection, false));
+            }
+        });
+    }
+
+    private void renderDiscordChannels(Host host, HostGatewayClient.Connection connection,
+                                       String title, String details,
+                                       List<HostGatewayClient.DiscordChannel> channels,
+                                       Runnable refreshAction, Runnable backAction) {
+        List<View> actions = new ArrayList<>();
+        if (channels.isEmpty()) {
+            actions.add(panelStatus("No voice channels are available."));
+        } else {
+            for (HostGatewayClient.DiscordChannel channel : channels) {
+                String count = channel.people >= 0 ? "  ·  " + channel.people + " online" : "";
+                TextView action = panelAction((channel.favorite ? "★  " : "") + channel.name + count);
+                action.setOnClickListener(v -> runDiscordOperation(host, connection,
+                        "Connecting to " + channel.name + "…",
+                        "Connected to " + channel.name + ".",
+                        () -> renderDiscordChannels(host, connection, title, details, channels,
+                                refreshAction, backAction),
+                        () -> joinDiscordChannelAndRemember(host, connection, channel)));
+                actions.add(action);
+            }
+        }
+        TextView refresh = panelAction("REFRESH CHANNELS");
+        TextView back = panelAction("BACK");
+        refresh.setOnClickListener(v -> refreshAction.run());
+        back.setOnClickListener(v -> backAction.run());
+        actions.add(refresh);
+        actions.add(back);
+        showSidePanel("DISCORD", title, details, backAction, actions.toArray(new View[0]));
+    }
+
+    private int showDiscordLoadingPanel(Host host, String title, String message, Runnable backAction) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus(message);
+        TextView back = panelAction("BACK");
+        back.setOnClickListener(v -> backAction.run());
+        showSidePanel("DISCORD", title, null, backAction, status, back);
+        return request;
+    }
+
+    private void showDiscordLoadError(int request, Host host, String title, Throwable error,
+                                      Runnable retryAction, Runnable backAction) {
+        mainHandler.post(() -> {
+            if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+            TextView status = panelStatus("Unable to load Discord\n" + friendlyGatewayError(error));
+            TextView retry = panelAction("RETRY");
+            TextView back = panelAction("BACK");
+            retry.setOnClickListener(v -> retryAction.run());
+            back.setOnClickListener(v -> backAction.run());
+            showSidePanel("DISCORD", title, null, backAction, status, retry, back);
+        });
+    }
+
+    private void runDiscordOperation(Host host, HostGatewayClient.Connection connection,
+                                     String progress, String success, Runnable returnAction,
+                                     DiscordOperation operation) {
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus(progress);
+        TextView back = panelAction("BACK TO DISCORD");
+        TextView close = panelAction("CLOSE");
+        back.setVisibility(View.GONE);
+        back.setOnClickListener(v -> returnAction.run());
+        close.setOnClickListener(v -> hideSidePanel(true));
+        showSidePanel("DISCORD", "Host operation", null, returnAction, status, back, close);
+        executor.submit(() -> {
+            try {
+                operation.run();
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText(success);
+                    back.setVisibility(View.VISIBLE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Discord operation failed\n" + friendlyGatewayError(error));
+                    back.setVisibility(View.VISIBLE);
+                    rebuildSidePanelFocusNavigation();
+                });
+            }
+        });
+    }
+
+    private void joinDiscordChannelAndRemember(Host host,
+                                               HostGatewayClient.Connection connection,
+                                               HostGatewayClient.DiscordChannel channel)
+            throws IOException {
+        hostGatewayClient.joinDiscordChannel(connection, channel);
+        hostGatewayStore.saveLastDiscordChannel(host.uuid, channel.id, channel.guildId,
+                channel.guildName, channel.name);
+    }
+
+    private interface DiscordOperation {
+        void run() throws IOException;
+    }
+
+    private static String discordUnavailableMessage(HostGatewayClient.DiscordStatus status) {
+        if (status != null && status.error != null && !status.error.trim().isEmpty()) {
+            return status.error.trim();
+        }
+        return "Discord is not active in this Bridge profile. Open Discord Settings to start it.";
+    }
+
+    private static String friendlyGatewayError(Throwable error) {
+        String message = error.getMessage();
+        if (message == null || message.trim().isEmpty()) return error.getClass().getSimpleName();
+        message = message.trim();
+        return message.length() > 240 ? message.substring(0, 240) + "…" : message;
     }
 
     private void showSessionPanel() {
+        clearDiscordControllerShortcuts();
         StreamStatus status = currentStreamStatus;
         if (!isActiveStream(status)) {
             Toast.makeText(this, "The active stream is no longer available.", Toast.LENGTH_LONG).show();
@@ -1832,14 +3445,21 @@ public final class LauncherActivity extends Activity {
 
     private void refreshHostAvailabilityAsync() {
         if (visibleHosts.isEmpty() || !hostProbeRunning.compareAndSet(false, true)) return;
+        int dashboardToken = dashboardRequests.currentToken();
+        if (!isCurrentDashboardRequest(dashboardToken)) {
+            hostProbeRunning.set(false);
+            return;
+        }
+        int request = hostProbeRequest.incrementAndGet();
         lastHostProbeAt = System.currentTimeMillis();
         List<Host> hosts = new ArrayList<>(visibleHosts);
         executor.execute(() -> {
             Map<String, Boolean> availability = new HashMap<>();
             for (Host host : hosts) availability.put(host.uuid, findReadyPort(host) > 0);
             mainHandler.post(() -> {
+                if (request != hostProbeRequest.get()) return;
                 hostProbeRunning.set(false);
-                if (isFinishing() || isDestroyed()) return;
+                if (!isCurrentDashboardRequest(dashboardToken)) return;
                 for (Host host : hosts) {
                     if (!isActiveForHost(currentStreamStatus, host)) {
                         boolean online = Boolean.TRUE.equals(availability.get(host.uuid));
@@ -2133,11 +3753,15 @@ public final class LauncherActivity extends Activity {
         refreshCardRow(hostRow, true);
         if (resumeButton != null) stylePrimaryButton(resumeButton, resumeButton.hasFocus());
         if (sessionButton != null) styleCompactButton(sessionButton, sessionButton.hasFocus());
+        if (communityButton != null && communityButton.getVisibility() == View.VISIBLE) {
+            styleCompactButton(communityButton, communityButton.hasFocus());
+        }
         if (settingsButton != null) styleCompactButton(settingsButton, settingsButton.hasFocus());
         if (sidePanel != null) {
-            for (int i = 0; i < sidePanel.getChildCount(); i++) {
-                View child = sidePanel.getChildAt(i);
-                if (child.isFocusable()) styleCompactButton(child, child.hasFocus());
+            List<View> actions = new ArrayList<>();
+            collectFocusableViews(sidePanel, actions);
+            for (View action : actions) {
+                styleCompactButton(action, action.hasFocus());
             }
         }
     }
