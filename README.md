@@ -8,12 +8,16 @@ couch-friendly entry point before Moonlight:
   unpairing, with confirmation before destructive actions;
 - reads the saved Vibepollo/Sunshine hosts from Moonlight;
 - displays Moonlight's cached applications and poster art in its own TV UI;
+- presents glass application tiles with last-played metadata, artwork-tinted
+  focus styling and remembered horizontal positions;
 - sends Wake-on-LAN to the selected host;
 - displays a native-resolution animated loading slideshow with rotating English
   status messages;
 - waits for the host streaming ports to become reachable;
 - starts the selected application directly through Moonlight's public launch
   intent and returns to Wake & Play when the stream ends;
+- provides a console-style active-session panel and interface options for UI
+  sounds and reduced motion;
 - opens Moonlight's real streaming settings from the launcher.
 
 ## Compatibility and signing
@@ -102,7 +106,7 @@ Moonlight exposes narrowly scoped integration surfaces:
 - the public action `com.limelight.action.STREAM` with
   host/app identifiers and `com.limelight.extra.EXTERNAL_FRONTEND=true` to
   start a shell-owned session without leaving Moonlight's host UI underneath;
-- `com.limelight.action.OPEN_SETTINGS` for the real Moonlight settings screen.
+- `com.limelight.action.OPEN_SETTINGS` for the real Moonlight settings screen;
 - `com.limelight.action.RETURN_STREAM` to reveal an existing stream without
   relaunching its host application;
 - the stream-status provider for live session state and elapsed time.
@@ -117,18 +121,25 @@ compositors.
 Moonlight routes HOME and BACK from externally launched streams back to Wake &
 Play, so these keys open the session controls rather than ending the stream.
 
-The active-session panel shows the current stream format and provides confirmed
-actions to return, disconnect while leaving the host app running, or end the
-host app. Destructive controls use Moonlight's signature-protected
+The custom side-panel for an active session shows the current stream format and
+provides confirmed actions to return, disconnect while leaving the host app
+running, or end the host app. Destructive controls use Moonlight's signature-protected
 `CONTROL_STREAM` permission. Focusing an application tile also blends its
 poster into a lightly softened color wash plus a proportion-preserving hero
-image. Focus changes are debounced and cross-faded for a calmer console-style
-background without blocking the UI. Application, host, and controller tiles use
+image. Focus changes are debounced and cross-faded without an intermediate
+blank frame, creating a calmer console-style background without blocking the
+UI. Application, host, and controller tiles use
 a subtle translucent glass treatment, while Options stays in the upper-right
 corner and Session matches the primary action's height. Moving between
-application tiles also uses
-the Android TV focus sound, and any manual D-pad input cancels delayed default
-focus so navigation is never pulled back to the Resume action.
+application, host, and controller tiles uses the Android TV focus sound, and
+confirm/back actions have their own feedback. Empty controller rows collapse,
+UI sounds and motion can be adjusted in Options, and any manual D-pad input
+cancels delayed default focus so navigation is never pulled back to the Resume
+action.
+
+The external launch contract carries the loader animation epoch and reduced-
+motion preference into Moonlight. This keeps both sides of the hand-off on the
+same visual frame while Moonlight waits for a stable decoded video frame.
 
 The provider does not expose credentials or pairing certificates. Its signature
 permission limits access to applications signed with the same certificate. The

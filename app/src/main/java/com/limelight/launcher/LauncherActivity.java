@@ -17,6 +17,8 @@ import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.TransitionDrawable;
 import android.hardware.BatteryState;
 import android.media.AudioManager;
 import android.net.Uri;
@@ -30,6 +32,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -84,6 +87,8 @@ public final class LauncherActivity extends Activity {
     private static final String EXTRA_EXTERNAL_FRONTEND = "com.limelight.extra.EXTERNAL_FRONTEND";
     private static final String EXTRA_EXTERNAL_FRONTEND_PACKAGE = "com.limelight.extra.EXTERNAL_FRONTEND_PACKAGE";
     private static final String EXTRA_EXTERNAL_FRONTEND_MESSAGE = "com.limelight.extra.EXTERNAL_FRONTEND_MESSAGE";
+    private static final String EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH = "com.limelight.extra.EXTERNAL_FRONTEND_ANIMATION_EPOCH";
+    private static final String EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION = "com.limelight.extra.EXTERNAL_FRONTEND_REDUCED_MOTION";
     private static final long HOST_TIMEOUT_MS = 90_000;
     private static final int REQUEST_BLUETOOTH_CONNECT = 7001;
     private static final String HISTORY_PREFS = "launch_history";
@@ -91,6 +96,8 @@ public final class LauncherActivity extends Activity {
     private static final String PREF_LAST_APP_ID = "last_app_id";
     private static final String PREF_LAST_APP_NAME = "last_app_name";
     private static final String PREF_LAST_LAUNCH_AT = "last_launch_at";
+    private static final String PREF_UI_SOUNDS = "ui_sounds";
+    private static final String PREF_REDUCED_MOTION = "reduced_motion";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
@@ -102,21 +109,34 @@ public final class LauncherActivity extends Activity {
     private StreamStatus currentStreamStatus;
     private long lastHostProbeAt;
     private boolean initialFocusPending;
+    private boolean userNavigationStarted;
+    private long initialFocusDeadline;
     private boolean sessionStatusLoaded;
     private LinearLayout controllerRow;
     private LinearLayout hostRow;
     private LinearLayout appRow;
+    private TextView controllersLabel;
+    private HorizontalScrollView controllerScroll;
+    private HorizontalScrollView hostScroll;
+    private HorizontalScrollView appScroll;
     private TextView emptyState;
     private TextView appsLabel;
     private TextView appEmptyState;
     private TextView sessionState;
-    private TextView resumeButton;
-    private TextView sessionButton;
+    private LinearLayout resumeButton;
+    private TextView resumeTitle;
+    private TextView resumeSubtitle;
+    private LinearLayout sessionButton;
+    private TextView sessionTitle;
+    private TextView settingsButton;
+    private FrameLayout modalLayer;
+    private LinearLayout sidePanel;
     private ImageView artworkBackdrop;
     private ImageView artworkHero;
     private View artworkScrim;
     private Bitmap currentBackdropBitmap;
     private Bitmap currentHeroBitmap;
+    private final List<Bitmap> retiredArtworkBitmaps = new ArrayList<>();
     private FrameLayout homeLayer;
     private FrameLayout loadingLayer;
     private GenerativeSlideshow slideshow;
@@ -129,7 +149,17 @@ public final class LauncherActivity extends Activity {
     private BluetoothAction pendingBluetoothAction;
     private Host selectedHost;
     private View selectedHostCard;
-    private View lastFocusedAppCard;
+    private View lastFocusedTile;
+    private View lastContentFocus;
+    private View focusAfterExternalActivity;
+    private boolean restoreFocusAfterResume;
+    private boolean uiSoundsEnabled;
+    private boolean reducedMotion;
+    private int glassAccentColor = 0xFF66549A;
+    private int controllerScrollPosition;
+    private int hostScrollPosition;
+    private int appScrollPosition;
+    private String appScrollHostUuid;
     private Host lastLaunchHost;
     private StreamApp lastLaunchApp;
     private final String[] loadingMessages = {
@@ -159,8 +189,10 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        // Force an opaque buffer to avoid partial-redraw artifacts on Android TV
-        // compositors when this window replaces the Moonlight stream Surface.
+        uiSoundsEnabled = history().getBoolean(PREF_UI_SOUNDS, true);
+        reducedMotion = history().getBoolean(PREF_REDUCED_MOTION, false);
+        // Always submit a complete opaque frame. Sony's compositor otherwise
+        // reuses partially damaged buffers during task hand-off.
         getWindow().setFormat(PixelFormat.OPAQUE);
         setContentView(buildUi());
         hideSystemUi();
@@ -171,17 +203,35 @@ public final class LauncherActivity extends Activity {
         super.onResume();
         launchCancelled.set(false);
         if (homeLayer != null) {
-            initialFocusPending = true;
+            userNavigationStarted = false;
+            initialFocusPending = !restoreFocusAfterResume;
+            // Resume may become visible after the status-provider response. Give it
+            // one short opportunity to become the initial focus, never a delayed
+            // opportunity to replace focus after navigation has already begun.
+            initialFocusDeadline = initialFocusPending ? Long.MAX_VALUE : 0L;
             sessionStatusLoaded = false;
             showHome();
             refreshDashboard();
-            mainHandler.postDelayed(this::finishInitialFocus, 650);
+            if (initialFocusPending) {
+                // The initial provider reads above are complete now, so the
+                // deadline begins when the UI is actually ready for input.
+                initialFocusDeadline = SystemClock.uptimeMillis() + 450L;
+            }
+            if (restoreFocusAfterResume) {
+                restoreFocusAfterResume = false;
+                mainHandler.postDelayed(this::restoreExternalActivityFocus, 650);
+            } else {
+                mainHandler.postDelayed(this::finishInitialFocus, 120);
+            }
         }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        if (controllerScroll != null) controllerScrollPosition = controllerScroll.getScrollX();
+        if (hostScroll != null) hostScrollPosition = hostScroll.getScrollX();
+        if (appScroll != null) appScrollPosition = appScroll.getScrollX();
         mainHandler.removeCallbacksAndMessages(null);
         if (slideshow != null) slideshow.stop();
         if (homeLayer != null && homeLayer.getVisibility() == View.VISIBLE) {
@@ -195,7 +245,7 @@ public final class LauncherActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus && homeLayer != null && homeLayer.getVisibility() == View.VISIBLE) {
-            mainHandler.postDelayed(this::focusResumeActionIfPending, 120);
+            mainHandler.postDelayed(this::focusResumeActionIfPending, 60);
         }
     }
 
@@ -210,7 +260,9 @@ public final class LauncherActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (loadingLayer.getVisibility() == View.VISIBLE) {
+        if (modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) {
+            hideSidePanel(true);
+        } else if (loadingLayer.getVisibility() == View.VISIBLE) {
             launchCancelled.set(true);
             showHome();
         } else {
@@ -218,21 +270,66 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    private void restoreExternalActivityFocus() {
+        View target = focusAfterExternalActivity;
+        focusAfterExternalActivity = null;
+        if (target != null && target.isShown() && target.requestFocus()) return;
+        if (settingsButton != null && settingsButton.isShown()) settingsButton.requestFocus();
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (event.getAction() == KeyEvent.ACTION_DOWN && isNavigationKey(event.getKeyCode())) {
             // If the user starts navigating before the asynchronous dashboard data
             // arrives, their choice wins over the delayed default Resume focus.
+            userNavigationStarted = true;
             initialFocusPending = false;
+            if (event.getRepeatCount() == 0) {
+                if (isConfirmKey(event.getKeyCode())) {
+                    playUiSound(AudioManager.FX_KEY_CLICK, 0.42f);
+                } else if (event.getKeyCode() == KeyEvent.KEYCODE_BACK ||
+                        event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B) {
+                    playUiSound(AudioManager.FX_FOCUS_NAVIGATION_DOWN, 0.3f);
+                }
+                if (event.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B &&
+                        ((modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) ||
+                                (loadingLayer != null && loadingLayer.getVisibility() == View.VISIBLE))) {
+                    onBackPressed();
+                    return true;
+                }
+            }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (event.getAction() == MotionEvent.ACTION_MOVE &&
+                (event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+            float strongestAxis = Math.max(
+                    Math.max(Math.abs(event.getAxisValue(MotionEvent.AXIS_X)),
+                            Math.abs(event.getAxisValue(MotionEvent.AXIS_Y))),
+                    Math.max(Math.abs(event.getAxisValue(MotionEvent.AXIS_HAT_X)),
+                            Math.abs(event.getAxisValue(MotionEvent.AXIS_HAT_Y))));
+            if (strongestAxis > 0.35f) {
+                userNavigationStarted = true;
+                initialFocusPending = false;
+            }
+        }
+        return super.dispatchGenericMotionEvent(event);
     }
 
     private static boolean isNavigationKey(int keyCode) {
         return keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
                 keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
                 keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER ||
-                keyCode == KeyEvent.KEYCODE_BUTTON_A || keyCode == KeyEvent.KEYCODE_BUTTON_B;
+                keyCode == KeyEvent.KEYCODE_BUTTON_A || keyCode == KeyEvent.KEYCODE_BUTTON_B ||
+                keyCode == KeyEvent.KEYCODE_BACK;
+    }
+
+    private static boolean isConfirmKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_BUTTON_A;
     }
 
     private View buildUi() {
@@ -266,7 +363,7 @@ public final class LauncherActivity extends Activity {
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(64), dp(26), dp(64), dp(24));
+        content.setPadding(dp(64), dp(26), dp(64), dp(38));
         content.setClipChildren(false);
         content.setClipToPadding(false);
         homeLayer.addView(content, match());
@@ -290,11 +387,21 @@ public final class LauncherActivity extends Activity {
         quickActionsParams.topMargin = dp(6);
         content.addView(quickActions, quickActionsParams);
 
-        resumeButton = text("", 16, 0xFFF1EAFF, true);
+        resumeButton = new LinearLayout(this);
+        resumeButton.setOrientation(LinearLayout.VERTICAL);
+        resumeButton.setGravity(Gravity.CENTER_VERTICAL);
         resumeButton.setFocusable(true);
         resumeButton.setClickable(true);
-        resumeButton.setMinHeight(dp(46));
-        resumeButton.setPadding(dp(20), dp(8), dp(20), dp(8));
+        resumeButton.setSoundEffectsEnabled(false);
+        resumeButton.setMinimumWidth(dp(260));
+        resumeButton.setMinimumHeight(dp(54));
+        resumeButton.setPadding(dp(20), dp(6), dp(20), dp(6));
+        resumeTitle = text("▶  RETURN TO GAME", 15, 0xFFF7F2FF, true);
+        resumeSubtitle = text("", 11, 0xFFC8BCE8, false);
+        LinearLayout.LayoutParams resumeSubtitleParams = wrap();
+        resumeSubtitleParams.topMargin = dp(2);
+        resumeButton.addView(resumeTitle, wrap());
+        resumeButton.addView(resumeSubtitle, resumeSubtitleParams);
         resumeButton.setVisibility(View.GONE);
         resumeButton.setOnClickListener(v -> {
             if (isActiveStream(currentStreamStatus)) {
@@ -307,11 +414,22 @@ public final class LauncherActivity extends Activity {
         stylePrimaryButton(resumeButton, false);
         quickActions.addView(resumeButton, wrap());
 
-        sessionButton = text("SESSION", 15, 0xFFE8DDFF, true);
+        sessionButton = new LinearLayout(this);
+        sessionButton.setOrientation(LinearLayout.HORIZONTAL);
+        sessionButton.setGravity(Gravity.CENTER);
         sessionButton.setFocusable(true);
         sessionButton.setClickable(true);
-        sessionButton.setMinHeight(dp(46));
-        sessionButton.setPadding(dp(18), dp(8), dp(18), dp(8));
+        sessionButton.setSoundEffectsEnabled(false);
+        sessionButton.setMinimumHeight(dp(54));
+        sessionButton.setPadding(dp(16), dp(6), dp(16), dp(6));
+        ImageView sessionIcon = new ImageView(this);
+        sessionIcon.setImageResource(R.drawable.ic_active_session);
+        sessionIcon.setColorFilter(0xFFDCCFFF);
+        LinearLayout.LayoutParams sessionIconParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        sessionIconParams.rightMargin = dp(9);
+        sessionButton.addView(sessionIcon, sessionIconParams);
+        sessionTitle = text("SESSION", 14, 0xFFF1EAFF, true);
+        sessionButton.addView(sessionTitle, wrap());
         sessionButton.setVisibility(View.GONE);
         sessionButton.setOnClickListener(v -> showSessionPanel());
         sessionButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(sessionButton, focused));
@@ -320,11 +438,12 @@ public final class LauncherActivity extends Activity {
         sessionButtonParams.leftMargin = dp(10);
         quickActions.addView(sessionButton, sessionButtonParams);
 
-        TextView settingsButton = text("⚙  OPTIONS", 13, 0xFFD2C4FF, true);
+        settingsButton = text("⚙  OPTIONS", 13, 0xFFD2C4FF, true);
         settingsButton.setFocusable(true);
         settingsButton.setClickable(true);
+        settingsButton.setSoundEffectsEnabled(false);
         settingsButton.setPadding(dp(12), dp(5), dp(12), dp(5));
-        settingsButton.setOnClickListener(v -> openMoonlightSettings());
+        settingsButton.setOnClickListener(v -> showOptionsPanel());
         settingsButton.setOnFocusChangeListener((v, focused) -> styleCompactButton(settingsButton, focused));
         styleCompactButton(settingsButton, false);
         FrameLayout.LayoutParams settingsParams = new FrameLayout.LayoutParams(
@@ -334,11 +453,21 @@ public final class LauncherActivity extends Activity {
         settingsParams.rightMargin = dp(64);
         homeLayer.addView(settingsButton, settingsParams);
 
-        TextView controllersLabel = sectionLabel("CONTROLLERS");
+        resumeButton.setId(View.generateViewId());
+        sessionButton.setId(View.generateViewId());
+        settingsButton.setId(View.generateViewId());
+        resumeButton.setNextFocusUpId(settingsButton.getId());
+        resumeButton.setNextFocusRightId(sessionButton.getId());
+        sessionButton.setNextFocusLeftId(resumeButton.getId());
+        sessionButton.setNextFocusUpId(settingsButton.getId());
+        settingsButton.setNextFocusDownId(resumeButton.getId());
+        settingsButton.setNextFocusLeftId(resumeButton.getId());
+
+        controllersLabel = sectionLabel("CONTROLLERS");
         LinearLayout.LayoutParams sectionParams = wrap();
         sectionParams.topMargin = dp(11);
         content.addView(controllersLabel, sectionParams);
-        HorizontalScrollView controllerScroll = horizontalScroll();
+        controllerScroll = horizontalScroll();
         controllerRow = horizontalRow();
         controllerScroll.addView(controllerRow);
         LinearLayout.LayoutParams controllerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58));
@@ -349,7 +478,7 @@ public final class LauncherActivity extends Activity {
         LinearLayout.LayoutParams hostsLabelParams = wrap();
         hostsLabelParams.topMargin = dp(11);
         content.addView(hostsLabel, hostsLabelParams);
-        HorizontalScrollView hostScroll = horizontalScroll();
+        hostScroll = horizontalScroll();
         hostRow = horizontalRow();
         hostScroll.addView(hostRow);
         LinearLayout.LayoutParams hostParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96));
@@ -365,7 +494,8 @@ public final class LauncherActivity extends Activity {
         LinearLayout.LayoutParams appsLabelParams = wrap();
         appsLabelParams.topMargin = dp(10);
         content.addView(appsLabel, appsLabelParams);
-        HorizontalScrollView appScroll = horizontalScroll();
+        appScroll = horizontalScroll();
+        appScroll.setPadding(0, 0, dp(12), dp(10));
         appRow = horizontalRow();
         appScroll.addView(appRow);
         LinearLayout.LayoutParams appParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
@@ -375,6 +505,8 @@ public final class LauncherActivity extends Activity {
         appEmptyState = text("Choose a streaming host to see its applications.", 16, 0xFFBDC4D8, false);
         appEmptyState.setGravity(Gravity.CENTER);
         appRow.addView(appEmptyState, new LinearLayout.LayoutParams(dp(560), ViewGroup.LayoutParams.MATCH_PARENT));
+
+        buildSidePanelLayer();
 
         loadingLayer = new FrameLayout(this);
         loadingLayer.setVisibility(View.GONE);
@@ -402,7 +534,7 @@ public final class LauncherActivity extends Activity {
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         statusParams.topMargin = dp(14);
         loadingCopy.addView(loadingStatus, statusParams);
-        TextView cancelHint = text("Press BACK to cancel", 14, 0xBFFFFFFF, false);
+        TextView cancelHint = text("Press BACK to return to Wake & Play", 14, 0xBFFFFFFF, false);
         cancelHint.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         hintParams.topMargin = dp(34);
@@ -415,11 +547,12 @@ public final class LauncherActivity extends Activity {
 
     private void refreshDashboard() {
         refreshControllersAsync();
-        refreshSessionStatusAsync();
-        executor.execute(() -> {
-            List<Host> hosts = loadHosts();
-            mainHandler.post(() -> renderHosts(hosts));
-        });
+        // Perform the small local provider reads before the first focus decision.
+        // If these arrive later, making Resume visible can cause Android TV to
+        // redirect focus while the user is already navigating the dashboard.
+        renderStreamStatus(loadStreamStatus());
+        renderHosts(loadHosts());
+        mainHandler.postDelayed(this::refreshSessionStatusAsync, 1500);
     }
 
     private void refreshSessionStatusAsync() {
@@ -486,10 +619,16 @@ public final class LauncherActivity extends Activity {
             return;
         }
         String state = status.state.toUpperCase(Locale.ROOT);
-        StringBuilder label = new StringBuilder("MOONLIGHT · ").append(state);
+        StringBuilder label = new StringBuilder("streaming".equals(status.state) ? "● " :
+                "reconnecting".equals(status.state) ? "◐ " : "MOONLIGHT · ").append(state);
         if ("streaming".equals(status.state) || "reconnecting".equals(status.state)) {
             if (status.app != null && !status.app.isEmpty()) label.append(" · ").append(status.app);
-            if (status.bitrateKbps > 0) label.append(" · ").append(Math.round(status.bitrateKbps / 1000f)).append(" Mbps");
+            String quality = formatStreamQuality(status);
+            if (!quality.isEmpty()) label.append(" · ").append(quality);
+            if (status.hdr) label.append(" · HDR");
+            if (status.startedAt > 0) {
+                label.append(" · ").append(formatElapsed(System.currentTimeMillis() - status.startedAt));
+            }
         } else if ("connecting".equals(status.state) && status.stage != null && !status.stage.isEmpty()) {
             label.append(" · ").append(status.stage);
         }
@@ -541,13 +680,14 @@ public final class LauncherActivity extends Activity {
 
     private void renderControllers(List<ControllerInfo> controllers) {
         controllerRow.removeAllViews();
+        boolean hasControllers = !controllers.isEmpty();
+        controllersLabel.setText(hasControllers ? "CONTROLLERS" : "CONTROLLERS · NONE");
+        controllerScroll.setVisibility(hasControllers ? View.VISIBLE : View.GONE);
         int player = 1;
         for (ControllerInfo controller : controllers) {
             controllerRow.addView(controllerCard(player++, controller), cardSpacing());
         }
-        if (controllers.isEmpty()) {
-            controllerRow.addView(text("No controllers connected", 15, 0xFFB6BDD2, false), cardSpacing());
-        }
+        controllerScroll.post(() -> controllerScroll.scrollTo(controllerScrollPosition, 0));
     }
 
     private View controllerCard(int player, ControllerInfo controller) {
@@ -556,9 +696,10 @@ public final class LauncherActivity extends Activity {
         boolean charging = controller.charging;
         LinearLayout card = cardBase(dp(220), dp(50));
         TextView icon = text("🎮", 23, Color.WHITE, false);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
+        card.addView(icon, new LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setGravity(Gravity.CENTER_VERTICAL);
         TextView label = text("P" + player + "  " + compactControllerName(name), 14, Color.WHITE, true);
         label.setSingleLine(true);
         copy.addView(label, wrap());
@@ -570,7 +711,10 @@ public final class LauncherActivity extends Activity {
         card.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         final int controllerNumber = player;
         card.setOnClickListener(v -> showControllerMenu(controllerNumber, controller));
-        card.setOnFocusChangeListener((v, focused) -> styleCard(card, focused));
+        card.setOnFocusChangeListener((v, focused) -> {
+            styleCard(card, focused);
+            noteTileFocus(card, focused);
+        });
         return card;
     }
 
@@ -578,30 +722,30 @@ public final class LauncherActivity extends Activity {
         boolean canIdentify = ControllerActions.canIdentify(controller.deviceId);
         boolean canPowerOff = ControllerActions.canDisconnect();
         String[] actions = {
-                canIdentify ? "Wskaż kontroler" : "Wskaż kontroler · niedostępne",
-                canPowerOff ? "Wyłącz kontroler" : "Wyłącz kontroler · niedostępne",
-                "Odłącz kontroler"
+                canIdentify ? "Identify controller" : "Identify controller · unavailable",
+                canPowerOff ? "Power off controller" : "Power off controller · unavailable",
+                "Unpair controller"
         };
         new AlertDialog.Builder(this)
                 .setTitle("P" + player + " · " + compactControllerName(controller.name))
                 .setItems(actions, (dialog, which) -> {
                     if (which == 0) {
                         if (canIdentify) identifyController(controller);
-                        else showUnavailableControllerFeature("Sony nie udostępnia aplikacjom sterowania LED ani wibracją tego kontrolera.");
+                        else showUnavailableControllerFeature("Sony does not expose LED or vibration controls for this controller to apps.");
                     } else if (which == 1) {
                         if (canPowerOff) confirmPowerOff(controller);
-                        else showUnavailableControllerFeature("Ta wersja Android TV nie udostępnia aplikacjom funkcji wyłączenia kontrolera Bluetooth.");
+                        else showUnavailableControllerFeature("This Android TV version does not let apps power off Bluetooth controllers.");
                     } else {
                         confirmUnpair(controller);
                     }
                 })
-                .setNegativeButton("Anuluj", null)
+                .setNegativeButton("Cancel", null)
                 .show();
     }
 
     private void showUnavailableControllerFeature(String message) {
         new AlertDialog.Builder(this)
-                .setTitle("Funkcja niedostępna")
+                .setTitle("Feature unavailable")
                 .setMessage(message)
                 .setPositiveButton("OK", null)
                 .show();
@@ -615,20 +759,20 @@ public final class LauncherActivity extends Activity {
 
     private void confirmPowerOff(ControllerInfo controller) {
         new AlertDialog.Builder(this)
-                .setTitle("Wyłączyć kontroler?")
-                .setMessage("Kontroler zostanie rozłączony z telewizorem. Aby połączyć go ponownie, naciśnij przycisk PS.")
-                .setNegativeButton("Anuluj", null)
-                .setPositiveButton("Wyłącz", (dialog, which) ->
+                .setTitle("Power off controller?")
+                .setMessage("The controller will disconnect from the TV. Press the PS button to connect it again.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Power off", (dialog, which) ->
                         runBluetoothAction(controller, BluetoothAction.POWER_OFF))
                 .show();
     }
 
     private void confirmUnpair(ControllerInfo controller) {
         new AlertDialog.Builder(this)
-                .setTitle("Odparować kontroler?")
-                .setMessage("Parowanie Bluetooth zostanie usunięte. Aby ponownie użyć kontrolera, trzeba będzie sparować go z telewizorem od nowa.")
-                .setNegativeButton("Anuluj", null)
-                .setPositiveButton("Odłącz", (dialog, which) ->
+                .setTitle("Unpair controller?")
+                .setMessage("The Bluetooth pairing will be removed. To use this controller again, pair it with the TV once more.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Unpair", (dialog, which) ->
                         runBluetoothAction(controller, BluetoothAction.UNPAIR))
                 .show();
     }
@@ -664,10 +808,10 @@ public final class LauncherActivity extends Activity {
 
     private void showBluetoothFailure(String message) {
         new AlertDialog.Builder(this)
-                .setTitle("Operacja niedostępna")
+                .setTitle("Operation unavailable")
                 .setMessage(message)
-                .setNegativeButton("Zamknij", null)
-                .setPositiveButton("Ustawienia Bluetooth", (dialog, which) -> {
+                .setNegativeButton("Close", null)
+                .setPositiveButton("Bluetooth settings", (dialog, which) -> {
                     try {
                         startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
                     } catch (Exception error) {
@@ -689,7 +833,7 @@ public final class LauncherActivity extends Activity {
                 && controller != null && action != null) {
             executeBluetoothAction(controller, action);
         } else {
-            Toast.makeText(this, "Dostęp do Bluetooth jest wymagany dla tej operacji.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Bluetooth access is required for this operation.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -721,6 +865,7 @@ public final class LauncherActivity extends Activity {
         }
         updateSessionHostStatus();
         refreshHostAvailabilityAsync();
+        hostScroll.post(() -> hostScroll.scrollTo(hostScrollPosition, 0));
     }
 
     private View hostCard(Host host) {
@@ -748,8 +893,10 @@ public final class LauncherActivity extends Activity {
             styleHostCard(card, card.hasFocus(), true);
             selectHost(host, true);
         });
-        card.setOnFocusChangeListener((v, focused) ->
-                styleHostCard(card, focused, card == selectedHostCard));
+        card.setOnFocusChangeListener((v, focused) -> {
+            styleHostCard(card, focused, card == selectedHostCard);
+            noteTileFocus(card, focused);
+        });
         return card;
     }
 
@@ -772,7 +919,10 @@ public final class LauncherActivity extends Activity {
 
     private void renderApps(Host host, List<StreamApp> apps) {
         appRow.removeAllViews();
-        lastFocusedAppCard = null;
+        lastFocusedTile = null;
+        int restoredScroll = host != null && host.uuid.equals(appScrollHostUuid) ? appScrollPosition : 0;
+        appScrollHostUuid = host != null ? host.uuid : null;
+        appScroll.post(() -> appScroll.scrollTo(restoredScroll, 0));
         if (host == null) {
             clearArtworkBackdrop();
             appsLabel.setText("APPS");
@@ -792,7 +942,7 @@ public final class LauncherActivity extends Activity {
     }
 
     private View appCard(Host host, StreamApp app) {
-        LinearLayout card = cardBase(dp(285), dp(96));
+        LinearLayout card = cardBase(dp(300), dp(110));
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
 
@@ -806,7 +956,7 @@ public final class LauncherActivity extends Activity {
                 new int[]{0xFF302255, 0xFF142A46});
         placeholder.setCornerRadius(dp(9));
         poster.setBackground(placeholder);
-        card.addView(poster, new LinearLayout.LayoutParams(dp(48), dp(72)));
+        card.addView(poster, new LinearLayout.LayoutParams(dp(56), dp(84)));
         loadPosterAsync(app.posterUri, poster);
 
         LinearLayout copy = new LinearLayout(this);
@@ -815,9 +965,19 @@ public final class LauncherActivity extends Activity {
         TextView name = text(app.name, 16, Color.WHITE, true);
         name.setSingleLine(true);
         copy.addView(name, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        long playedAt = appPlayedAt(host, app);
+        String metadataLabel = playedAt > 0
+                ? "LAST PLAYED · " + formatRelative(Math.max(0L,
+                System.currentTimeMillis() - playedAt)).toUpperCase(Locale.ROOT)
+                : "READY";
+        TextView metadata = text(metadataLabel, 10, 0xFFAAAFC2, true);
+        LinearLayout.LayoutParams metadataParams = wrap();
+        metadataParams.topMargin = dp(5);
+        copy.addView(metadata, metadataParams);
         TextView action = text("PLAY  ›", 12, 0xFFB99CFF, true);
+        action.setAlpha(0f);
         LinearLayout.LayoutParams actionParams = wrap();
-        actionParams.topMargin = dp(10);
+        actionParams.topMargin = dp(5);
         copy.addView(action, actionParams);
         LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         copyParams.leftMargin = dp(14);
@@ -825,20 +985,34 @@ public final class LauncherActivity extends Activity {
         card.setOnClickListener(v -> beginAppLaunch(host, app));
         card.setOnFocusChangeListener((v, focused) -> {
             styleCard(card, focused);
+            action.animate().cancel();
+            if (reducedMotion) {
+                action.setAlpha(focused ? 1f : 0f);
+            } else {
+                action.animate().alpha(focused ? 1f : 0f).setDuration(120).start();
+            }
             if (focused) {
-                if (lastFocusedAppCard != null && lastFocusedAppCard != card) playTileFocusSound();
-                lastFocusedAppCard = card;
+                noteTileFocus(card, true);
                 showArtworkBackdrop(app.posterUri);
             }
         });
         return card;
     }
 
+    private void noteTileFocus(View tile, boolean focused) {
+        if (!focused) return;
+        if (lastFocusedTile != null && lastFocusedTile != tile) playTileFocusSound();
+        lastFocusedTile = tile;
+    }
+
     private void playTileFocusSound() {
+        playUiSound(AudioManager.FX_FOCUS_NAVIGATION_RIGHT, 0.28f);
+    }
+
+    private void playUiSound(int effect, float volume) {
+        if (!uiSoundsEnabled) return;
         AudioManager audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
-        if (audioManager != null) {
-            audioManager.playSoundEffect(AudioManager.FX_FOCUS_NAVIGATION_RIGHT, 0.45f);
-        }
+        if (audioManager != null) audioManager.playSoundEffect(effect, volume);
     }
 
     private void loadPosterAsync(Uri uri, ImageView target) {
@@ -907,29 +1081,53 @@ public final class LauncherActivity extends Activity {
         artworkBackdrop.animate().cancel();
         artworkHero.animate().cancel();
         artworkScrim.animate().cancel();
-        // Keep the previous artwork visible until the next one is ready, then
-        // use a slow dip instead of a hard full-screen replacement.
-        artworkBackdrop.animate().alpha(0.06f).setDuration(200).start();
-        artworkHero.animate().alpha(0f).setDuration(200).withEndAction(() -> {
-            if (request != backdropRequest.get() || isFinishing() || isDestroyed()) {
-                result.recycle();
-                return;
-            }
-            Bitmap oldBackdrop = currentBackdropBitmap;
-            Bitmap oldHero = currentHeroBitmap;
-            currentBackdropBitmap = result.backdrop;
-            currentHeroBitmap = result.hero;
+
+        Bitmap oldBackdrop = currentBackdropBitmap;
+        Bitmap oldHero = currentHeroBitmap;
+        currentBackdropBitmap = result.backdrop;
+        currentHeroBitmap = result.hero;
+        if (oldBackdrop != null) retiredArtworkBitmaps.add(oldBackdrop);
+        if (oldHero != null) retiredArtworkBitmaps.add(oldHero);
+
+        glassAccentColor = sampleArtworkAccent(result.hero);
+        refreshGlassStyles();
+
+        if (oldBackdrop == null || oldHero == null || reducedMotion) {
             artworkBackdrop.setImageBitmap(currentBackdropBitmap);
             artworkHero.setImageBitmap(currentHeroBitmap);
-            if (oldBackdrop != null && !oldBackdrop.isRecycled()) oldBackdrop.recycle();
-            if (oldHero != null && !oldHero.isRecycled()) oldHero.recycle();
+            artworkBackdrop.setAlpha(0.28f);
+            artworkHero.setAlpha(0.58f);
+            artworkHero.setScaleX(1f);
+            artworkHero.setScaleY(1f);
+            artworkScrim.setAlpha(1f);
+            recycleRetiredArtwork();
+            return;
+        }
 
-            artworkBackdrop.setAlpha(0.06f);
-            artworkHero.setAlpha(0f);
-            artworkBackdrop.animate().alpha(0.28f).setDuration(520).start();
-            artworkHero.animate().alpha(0.58f).setDuration(520).start();
-            artworkScrim.animate().alpha(1f).setDuration(420).start();
-        }).start();
+        TransitionDrawable backdropTransition = new TransitionDrawable(new android.graphics.drawable.Drawable[]{
+                new BitmapDrawable(getResources(), oldBackdrop),
+                new BitmapDrawable(getResources(), currentBackdropBitmap)});
+        backdropTransition.setCrossFadeEnabled(true);
+        TransitionDrawable heroTransition = new TransitionDrawable(new android.graphics.drawable.Drawable[]{
+                new BitmapDrawable(getResources(), oldHero),
+                new BitmapDrawable(getResources(), currentHeroBitmap)});
+        heroTransition.setCrossFadeEnabled(true);
+        artworkBackdrop.setImageDrawable(backdropTransition);
+        artworkHero.setImageDrawable(heroTransition);
+        artworkBackdrop.setAlpha(0.28f);
+        artworkHero.setAlpha(0.58f);
+        artworkHero.setScaleX(1.025f);
+        artworkHero.setScaleY(1.025f);
+        backdropTransition.startTransition(420);
+        heroTransition.startTransition(420);
+        artworkHero.animate().scaleX(1f).scaleY(1f).setDuration(460).start();
+        artworkScrim.animate().alpha(1f).setDuration(260).start();
+        mainHandler.postDelayed(() -> {
+            if (request != backdropRequest.get() || isFinishing() || isDestroyed()) return;
+            artworkBackdrop.setImageBitmap(currentBackdropBitmap);
+            artworkHero.setImageBitmap(currentHeroBitmap);
+            recycleRetiredArtwork();
+        }, 500);
     }
 
     private void clearArtworkBackdrop() {
@@ -953,6 +1151,37 @@ public final class LauncherActivity extends Activity {
         if (currentHeroBitmap != null && !currentHeroBitmap.isRecycled()) currentHeroBitmap.recycle();
         currentBackdropBitmap = null;
         currentHeroBitmap = null;
+        recycleRetiredArtwork();
+    }
+
+    private void recycleRetiredArtwork() {
+        for (Bitmap bitmap : retiredArtworkBitmaps) {
+            if (bitmap != null && bitmap != currentBackdropBitmap && bitmap != currentHeroBitmap && !bitmap.isRecycled()) {
+                bitmap.recycle();
+            }
+        }
+        retiredArtworkBitmaps.clear();
+    }
+
+    private static int sampleArtworkAccent(Bitmap bitmap) {
+        if (bitmap == null || bitmap.isRecycled()) return 0xFF66549A;
+        long red = 0, green = 0, blue = 0, count = 0;
+        int stepX = Math.max(1, bitmap.getWidth() / 20);
+        int stepY = Math.max(1, bitmap.getHeight() / 20);
+        for (int y = stepY / 2; y < bitmap.getHeight(); y += stepY) {
+            for (int x = stepX / 2; x < bitmap.getWidth(); x += stepX) {
+                int color = bitmap.getPixel(x, y);
+                int brightness = Color.red(color) + Color.green(color) + Color.blue(color);
+                if (brightness < 90 || brightness > 690) continue;
+                red += Color.red(color);
+                green += Color.green(color);
+                blue += Color.blue(color);
+                count++;
+            }
+        }
+        if (count == 0) return 0xFF66549A;
+        int sampled = Color.rgb((int)(red / count), (int)(green / count), (int)(blue / count));
+        return blendColor(0xFF66549A, sampled, 0.42f);
     }
 
     private static Bitmap blurForBackdrop(Bitmap source) {
@@ -999,8 +1228,9 @@ public final class LauncherActivity extends Activity {
         loadingTitle.setText(app.name);
         setLoadingStatus("Preparing wake sequence...");
         lastLoadingMessageIndex = -1;
-        rotateLoadingMessage();
-        slideshow.start();
+        if (!reducedMotion) rotateLoadingMessage();
+        else loadingMessage.setText("Preparing your game...");
+        slideshow.start(!reducedMotion);
         executor.execute(() -> wakeAndWait(host, app));
     }
 
@@ -1082,6 +1312,8 @@ public final class LauncherActivity extends Activity {
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND, true);
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_PACKAGE, getPackageName());
         intent.putExtra(EXTRA_EXTERNAL_FRONTEND_MESSAGE, loadingMessage.getText().toString());
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND_ANIMATION_EPOCH, slideshow.getStartedAt());
+        intent.putExtra(EXTRA_EXTERNAL_FRONTEND_REDUCED_MOTION, reducedMotion);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
@@ -1146,13 +1378,11 @@ public final class LauncherActivity extends Activity {
         } catch (RuntimeException error) {
             Log.e(TAG, "Unable to query cached apps from " + uri, error);
         }
-        SharedPreferences history = history();
-        String lastHostUuid = history.getString(PREF_LAST_HOST_UUID, null);
-        int lastAppId = history.getInt(PREF_LAST_APP_ID, -1);
-        boolean isLastHost = host.uuid.equals(lastHostUuid);
-        apps.sort(Comparator
-                .comparingInt((StreamApp app) -> isLastHost && app.appId == lastAppId ? 0 : 1)
-                .thenComparing(app -> app.name.toLowerCase(Locale.ROOT)));
+        apps.sort((left, right) -> {
+            int byRecent = Long.compare(appPlayedAt(host, right), appPlayedAt(host, left));
+            return byRecent != 0 ? byRecent :
+                    left.name.compareToIgnoreCase(right.name);
+        });
         return apps;
     }
 
@@ -1180,11 +1410,14 @@ public final class LauncherActivity extends Activity {
     }
 
     private void rememberLastLaunch(Host host, StreamApp app) {
+        long now = System.currentTimeMillis();
         history().edit()
                 .putString(PREF_LAST_HOST_UUID, host.uuid)
                 .putInt(PREF_LAST_APP_ID, app.appId)
                 .putString(PREF_LAST_APP_NAME, app.name)
-                .putLong(PREF_LAST_LAUNCH_AT, System.currentTimeMillis())
+                .putLong(PREF_LAST_LAUNCH_AT, now)
+                .putLong(appHistoryKey(host.uuid, app.appId), now)
+                .putLong(hostHistoryKey(host.uuid), now)
                 .apply();
         lastLaunchHost = host;
         lastLaunchApp = app;
@@ -1195,17 +1428,20 @@ public final class LauncherActivity extends Activity {
         if (resumeButton == null) return;
         if (isActiveStream(currentStreamStatus)) {
             String app = currentStreamStatus.app != null && !currentStreamStatus.app.isEmpty()
-                    ? " · " + currentStreamStatus.app.toUpperCase(Locale.ROOT) : "";
-            resumeButton.setText("▶  RETURN TO STREAM" + app);
+                    ? currentStreamStatus.app : "Active stream";
+            resumeTitle.setText("▶  RETURN TO GAME");
+            resumeSubtitle.setText(app);
+            resumeButton.setContentDescription("Return to game, " + app);
             resumeButton.setVisibility(View.VISIBLE);
             if (sessionButton != null) {
-                String elapsed = currentStreamStatus.startedAt > 0
-                        ? " · " + formatElapsed(System.currentTimeMillis() - currentStreamStatus.startedAt) : "";
-                sessionButton.setText("SESSION" + elapsed);
+                sessionTitle.setText("SESSION");
+                sessionButton.setContentDescription("Active session controls");
                 sessionButton.setVisibility(View.VISIBLE);
             }
         } else if (lastLaunchHost != null && lastLaunchApp != null) {
-            resumeButton.setText("▶  RESUME LAST · " + lastLaunchApp.name.toUpperCase(Locale.ROOT));
+            resumeTitle.setText("▶  RESUME LAST");
+            resumeSubtitle.setText(lastLaunchApp.name);
+            resumeButton.setContentDescription("Resume last game, " + lastLaunchApp.name);
             resumeButton.setVisibility(View.VISIBLE);
             if (sessionButton != null) sessionButton.setVisibility(View.GONE);
         } else {
@@ -1216,9 +1452,18 @@ public final class LauncherActivity extends Activity {
     }
 
     private void focusResumeActionIfPending() {
+        if (userNavigationStarted || SystemClock.uptimeMillis() > initialFocusDeadline) {
+            initialFocusPending = false;
+            return;
+        }
         if (!initialFocusPending || resumeButton == null || resumeButton.getVisibility() != View.VISIBLE) return;
         resumeButton.post(() -> {
+            if (userNavigationStarted || SystemClock.uptimeMillis() > initialFocusDeadline) {
+                initialFocusPending = false;
+                return;
+            }
             if (!initialFocusPending || resumeButton.getVisibility() != View.VISIBLE || !resumeButton.isShown()) return;
+            if (modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) return;
             if (!getWindow().getDecorView().hasWindowFocus()) return;
             if (resumeButton.requestFocus()) initialFocusPending = false;
         });
@@ -1226,12 +1471,16 @@ public final class LauncherActivity extends Activity {
 
     private void finishInitialFocus() {
         if (!initialFocusPending || isFinishing() || isDestroyed()) return;
+        if (userNavigationStarted || SystemClock.uptimeMillis() > initialFocusDeadline) {
+            initialFocusPending = false;
+            return;
+        }
         if (!getWindow().getDecorView().hasWindowFocus()) {
-            mainHandler.postDelayed(this::finishInitialFocus, 150);
+            mainHandler.postDelayed(this::finishInitialFocus, 75);
             return;
         }
         if (!sessionStatusLoaded) {
-            mainHandler.postDelayed(this::finishInitialFocus, 250);
+            mainHandler.postDelayed(this::finishInitialFocus, 75);
             return;
         }
         if (resumeButton != null && resumeButton.getVisibility() == View.VISIBLE && resumeButton.isShown()) {
@@ -1267,6 +1516,153 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    private void buildSidePanelLayer() {
+        modalLayer = new FrameLayout(this);
+        modalLayer.setVisibility(View.GONE);
+        modalLayer.setFocusable(false);
+
+        View dim = new View(this);
+        dim.setBackgroundColor(0xA005060A);
+        dim.setClickable(true);
+        dim.setOnClickListener(v -> hideSidePanel(true));
+        modalLayer.addView(dim, match());
+
+        sidePanel = new LinearLayout(this);
+        sidePanel.setOrientation(LinearLayout.VERTICAL);
+        sidePanel.setPadding(dp(34), dp(42), dp(34), dp(32));
+        GradientDrawable panelBackground = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{0xF51A1D2A, 0xF0221B38, 0xFA090B12});
+        panelBackground.setCornerRadii(new float[]{dp(24), dp(24), 0, 0, 0, 0, dp(24), dp(24)});
+        panelBackground.setStroke(dp(1), 0x707B6AA9);
+        sidePanel.setBackground(panelBackground);
+        sidePanel.setElevation(dp(18));
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
+                dp(510), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
+        modalLayer.addView(sidePanel, panelParams);
+        homeLayer.addView(modalLayer, match());
+    }
+
+    private TextView panelAction(String label) {
+        TextView action = text(label, 14, 0xFFF0E9FF, true);
+        action.setFocusable(true);
+        action.setClickable(true);
+        action.setSoundEffectsEnabled(false);
+        action.setMinHeight(dp(56));
+        action.setPadding(dp(18), dp(10), dp(18), dp(10));
+        action.setOnFocusChangeListener((v, focused) -> styleCompactButton(action, focused));
+        styleCompactButton(action, false);
+        return action;
+    }
+
+    private void showSidePanel(String eyebrow, String title, String details, View... actions) {
+        if (modalLayer == null) return;
+        if (modalLayer.getVisibility() != View.VISIBLE) lastContentFocus = getCurrentFocus();
+        sidePanel.removeAllViews();
+
+        TextView eyebrowView = text(eyebrow, 12, 0xFFAFA4C9, true);
+        sidePanel.addView(eyebrowView, wrap());
+        TextView titleView = text(title, 29, Color.WHITE, true);
+        LinearLayout.LayoutParams titleParams = wrap();
+        titleParams.topMargin = dp(10);
+        sidePanel.addView(titleView, titleParams);
+        if (details != null && !details.isEmpty()) {
+            TextView detailsView = text(details, 14, 0xFFC1C5D6, false);
+            detailsView.setLineSpacing(dp(3), 1f);
+            LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            detailsParams.topMargin = dp(14);
+            detailsParams.bottomMargin = dp(26);
+            sidePanel.addView(detailsView, detailsParams);
+        }
+
+        View firstAction = null;
+        List<View> focusableActions = new ArrayList<>();
+        for (View action : actions) {
+            if (action.isFocusable()) {
+                if (firstAction == null) firstAction = action;
+                action.setId(View.generateViewId());
+                focusableActions.add(action);
+            }
+            LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            actionParams.bottomMargin = dp(10);
+            sidePanel.addView(action, actionParams);
+        }
+        for (int i = 0; i < focusableActions.size(); i++) {
+            View action = focusableActions.get(i);
+            View previous = focusableActions.get(Math.max(0, i - 1));
+            View next = focusableActions.get(Math.min(focusableActions.size() - 1, i + 1));
+            action.setNextFocusUpId(previous.getId());
+            action.setNextFocusDownId(next.getId());
+            action.setNextFocusLeftId(action.getId());
+            action.setNextFocusRightId(action.getId());
+        }
+
+        TextView hint = text("BACK  ·  CLOSE", 11, 0x8FFFFFFF, true);
+        LinearLayout.LayoutParams hintParams = wrap();
+        hintParams.topMargin = dp(12);
+        sidePanel.addView(hint, hintParams);
+
+        modalLayer.setVisibility(View.VISIBLE);
+        modalLayer.setAlpha(1f);
+        sidePanel.animate().cancel();
+        if (reducedMotion) {
+            sidePanel.setTranslationX(0f);
+        } else {
+            sidePanel.setTranslationX(dp(510));
+            sidePanel.animate().translationX(0f).setDuration(180).start();
+        }
+        View focusTarget = firstAction;
+        if (focusTarget != null) focusTarget.post(focusTarget::requestFocus);
+    }
+
+    private void hideSidePanel(boolean restoreFocus) {
+        if (modalLayer == null || modalLayer.getVisibility() != View.VISIBLE) return;
+        Runnable finish = () -> {
+            modalLayer.setVisibility(View.GONE);
+            sidePanel.setTranslationX(0f);
+            if (restoreFocus && lastContentFocus != null && lastContentFocus.isShown()) {
+                lastContentFocus.requestFocus();
+            }
+        };
+        sidePanel.animate().cancel();
+        if (reducedMotion) {
+            finish.run();
+        } else {
+            sidePanel.animate().translationX(dp(510)).setDuration(150).withEndAction(finish).start();
+        }
+    }
+
+    private void dismissSidePanelImmediately() {
+        if (sidePanel != null) {
+            sidePanel.animate().cancel();
+            sidePanel.setTranslationX(0f);
+        }
+        if (modalLayer != null) modalLayer.setVisibility(View.GONE);
+    }
+
+    private void showOptionsPanel() {
+        TextView soundAction = panelAction("UI SOUNDS  ·  " + (uiSoundsEnabled ? "ON" : "OFF"));
+        TextView motionAction = panelAction("REDUCED MOTION  ·  " + (reducedMotion ? "ON" : "OFF"));
+        TextView moonlightAction = panelAction("MOONLIGHT SETTINGS  ›");
+        soundAction.setOnClickListener(v -> {
+            uiSoundsEnabled = !uiSoundsEnabled;
+            history().edit().putBoolean(PREF_UI_SOUNDS, uiSoundsEnabled).apply();
+            soundAction.setText("UI SOUNDS  ·  " + (uiSoundsEnabled ? "ON" : "OFF"));
+        });
+        motionAction.setOnClickListener(v -> {
+            reducedMotion = !reducedMotion;
+            history().edit().putBoolean(PREF_REDUCED_MOTION, reducedMotion).apply();
+            motionAction.setText("REDUCED MOTION  ·  " + (reducedMotion ? "ON" : "OFF"));
+            refreshGlassStyles();
+        });
+        moonlightAction.setOnClickListener(v -> openMoonlightSettings());
+        showSidePanel("WAKE & PLAY", "Options",
+                "Tune the console interface or open Moonlight's streaming preferences.",
+                soundAction, motionAction, moonlightAction);
+    }
+
     private void showSessionPanel() {
         StreamStatus status = currentStreamStatus;
         if (!isActiveStream(status)) {
@@ -1287,60 +1683,24 @@ public final class LauncherActivity extends Activity {
             appendDetail(details, "Playing for " + formatElapsed(System.currentTimeMillis() - status.startedAt));
         }
 
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.VERTICAL);
-        actions.setPadding(dp(24), dp(2), dp(24), dp(8));
-
-        TextView detailsView = text(
-                details.length() > 0 ? details.toString() : "Moonlight is streaming to this TV.",
-                16, 0xFFFFFFFF, false);
-        detailsView.setPadding(0, 0, 0, dp(12));
-        actions.addView(detailsView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView returnAction = sessionDialogAction("▶  RETURN TO STREAM");
-        TextView disconnectAction = sessionDialogAction("DISCONNECT THIS TV · KEEP APP RUNNING");
-        TextView quitAction = sessionDialogAction("END APP ON HOST · DISCONNECT");
-        actions.addView(returnAction, sessionDialogActionParams(0));
-        actions.addView(disconnectAction, sessionDialogActionParams(dp(7)));
-        actions.addView(quitAction, sessionDialogActionParams(dp(7)));
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("ACTIVE SESSION · " + app)
-                .setView(actions)
-                .setNegativeButton("Cancel", null)
-                .create();
+        TextView returnAction = panelAction("▶  RETURN TO GAME");
+        TextView disconnectAction = panelAction("DISCONNECT THIS TV");
+        TextView quitAction = panelAction("END APP ON HOST");
         returnAction.setOnClickListener(v -> {
-            dialog.dismiss();
+            dismissSidePanelImmediately();
             returnToActiveStream(status.moonlightPackage);
         });
         disconnectAction.setOnClickListener(v -> {
-            dialog.dismiss();
+            hideSidePanel(true);
             confirmStreamControl(ACTION_DISCONNECT_STREAM, false);
         });
         quitAction.setOnClickListener(v -> {
-            dialog.dismiss();
+            hideSidePanel(true);
             confirmStreamControl(ACTION_QUIT_STREAM_APP, true);
         });
-        dialog.setOnShowListener(ignored -> returnAction.requestFocus());
-        dialog.show();
-    }
-
-    private TextView sessionDialogAction(String label) {
-        TextView action = text(label, 14, 0xFFE8DDFF, true);
-        action.setFocusable(true);
-        action.setClickable(true);
-        action.setPadding(dp(14), dp(10), dp(14), dp(10));
-        action.setOnFocusChangeListener((v, focused) -> styleCompactButton(action, focused));
-        styleCompactButton(action, false);
-        return action;
-    }
-
-    private LinearLayout.LayoutParams sessionDialogActionParams(int topMargin) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        params.topMargin = topMargin;
-        return params;
+        showSidePanel("ACTIVE SESSION", app,
+                details.length() > 0 ? details.toString() : "Moonlight is streaming to this TV.",
+                returnAction, disconnectAction, quitAction);
     }
 
     private static void appendDetail(StringBuilder details, String value) {
@@ -1407,9 +1767,7 @@ public final class LauncherActivity extends Activity {
         if (!isActiveStream(status)) return;
         for (Host host : visibleHosts) {
             if (!isActiveForHost(status, host)) continue;
-            String app = status.app != null && !status.app.isEmpty() ? status.app : "Active app";
-            String elapsed = status.startedAt > 0 ? " · " + formatElapsed(System.currentTimeMillis() - status.startedAt) : "";
-            setHostStatus(host, "● STREAMING · " + app + " · THIS TV" + elapsed, 0xFF69F0AE);
+            setHostStatus(host, "● THIS TV · Host ready", 0xFF69F0AE);
         }
     }
 
@@ -1427,13 +1785,39 @@ public final class LauncherActivity extends Activity {
     }
 
     private String lastPlayedSuffix(Host host) {
-        long timestamp = 0L;
+        long timestamp = hostPlayedAt(host);
         StreamStatus status = currentStreamStatus;
-        if (status != null && !isActiveStream(status) && isSameHost(status, host)) timestamp = status.updatedAt;
-        if (timestamp <= 0 && host.uuid.equals(history().getString(PREF_LAST_HOST_UUID, null))) {
-            timestamp = history().getLong(PREF_LAST_LAUNCH_AT, 0L);
+        if (status != null && !isActiveStream(status) && isSameHost(status, host)) {
+            timestamp = Math.max(timestamp, status.updatedAt);
         }
         return timestamp > 0 ? " · Played " + formatRelative(System.currentTimeMillis() - timestamp) : "";
+    }
+
+    private long appPlayedAt(Host host, StreamApp app) {
+        SharedPreferences prefs = history();
+        long timestamp = prefs.getLong(appHistoryKey(host.uuid, app.appId), 0L);
+        if (timestamp <= 0 && host.uuid.equals(prefs.getString(PREF_LAST_HOST_UUID, null)) &&
+                app.appId == prefs.getInt(PREF_LAST_APP_ID, -1)) {
+            timestamp = prefs.getLong(PREF_LAST_LAUNCH_AT, 0L);
+        }
+        return timestamp;
+    }
+
+    private long hostPlayedAt(Host host) {
+        SharedPreferences prefs = history();
+        long timestamp = prefs.getLong(hostHistoryKey(host.uuid), 0L);
+        if (timestamp <= 0 && host.uuid.equals(prefs.getString(PREF_LAST_HOST_UUID, null))) {
+            timestamp = prefs.getLong(PREF_LAST_LAUNCH_AT, 0L);
+        }
+        return timestamp;
+    }
+
+    private static String appHistoryKey(String hostUuid, int appId) {
+        return "played_at.app." + hostUuid + "." + appId;
+    }
+
+    private static String hostHistoryKey(String hostUuid) {
+        return "played_at.host." + hostUuid;
     }
 
     private static boolean isSameHost(StreamStatus status, Host host) {
@@ -1459,6 +1843,17 @@ public final class LauncherActivity extends Activity {
         return (hours / 24) + "d ago";
     }
 
+    private static String formatStreamQuality(StreamStatus status) {
+        if (status == null || status.height <= 0) return "";
+        String resolution;
+        if (status.height >= 2100) {
+            resolution = "4K";
+        } else {
+            resolution = status.height + "p";
+        }
+        return status.fps > 0 ? resolution + status.fps : resolution;
+    }
+
     private SharedPreferences history() {
         return getSharedPreferences(HISTORY_PREFS, MODE_PRIVATE);
     }
@@ -1475,10 +1870,17 @@ public final class LauncherActivity extends Activity {
             intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
             if (intent.resolveActivity(getPackageManager()) == null) continue;
             try {
+                focusAfterExternalActivity = lastContentFocus != null ? lastContentFocus : settingsButton;
+                restoreFocusAfterResume = true;
+                dismissSidePanelImmediately();
                 startActivity(intent);
                 overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
                 return;
-            } catch (RuntimeException ignored) { }
+            } catch (RuntimeException ignored) {
+                restoreFocusAfterResume = false;
+                focusAfterExternalActivity = null;
+                if (settingsButton != null) settingsButton.requestFocus();
+            }
         }
         Toast.makeText(this, "Compatible Moonlight X settings are not available.", Toast.LENGTH_LONG).show();
     }
@@ -1543,9 +1945,10 @@ public final class LauncherActivity extends Activity {
     private LinearLayout cardBase(int width, int height) {
         LinearLayout card = new LinearLayout(this);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(dp(18), dp(12), dp(18), dp(12));
+        card.setPadding(dp(16), dp(10), dp(16), dp(10));
         card.setFocusable(true);
         card.setClickable(true);
+        card.setSoundEffectsEnabled(false);
         card.setMinimumWidth(width);
         card.setMinimumHeight(height);
         styleCard(card, false);
@@ -1553,55 +1956,112 @@ public final class LauncherActivity extends Activity {
     }
 
     private void styleCard(View card, boolean focused) {
+        int focusedTop = withAlpha(blendColor(0xFF715BA8, glassAccentColor, 0.48f), 0xC8);
+        int focusedBottom = withAlpha(blendColor(0xFF403362, glassAccentColor, 0.32f), 0xB1);
+        int restingMiddle = withAlpha(blendColor(0xFF242B3D, glassAccentColor, 0.18f), 0x34);
         GradientDrawable background = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 focused
-                        ? new int[]{0xE57862AE, 0xD347386E}
-                        : new int[]{0x22FFFFFF, 0x3A232B3D, 0x66131825});
+                        ? new int[]{focusedTop, focusedBottom}
+                        : new int[]{0x18FFFFFF, restingMiddle, 0x5A131825});
         background.setCornerRadius(dp(14));
-        background.setStroke(dp(focused ? 3 : 1), focused ? 0xFFFFFFFF : 0x70AAB5D4);
+        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFECE7FF : 0x5C9AA6C4);
         card.setBackground(background);
-        card.setElevation(dp(focused ? 12 : 5));
-        card.setTranslationZ(dp(focused ? 4 : 0));
-        card.setScaleX(focused ? 1.045f : 1f);
-        card.setScaleY(focused ? 1.045f : 1f);
+        card.setElevation(dp(focused ? 9 : 3));
+        card.setTranslationZ(dp(focused ? 2 : 0));
+        animateFocusScale(card, focused ? 1.022f : 1f, 125);
     }
 
     private void styleHostCard(View card, boolean focused, boolean selected) {
+        int focusedTop = withAlpha(blendColor(0xFF62577F, glassAccentColor, 0.36f), 0xAF);
+        int focusedBottom = withAlpha(blendColor(0xFF353047, glassAccentColor, 0.24f), 0x9A);
         GradientDrawable background = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
                 focused
-                        ? new int[]{0xC0675A88, 0xB0343049}
+                        ? new int[]{focusedTop, focusedBottom}
                         : selected
-                        ? new int[]{0x20FFFFFF, 0x4420283A, 0x65161B28}
-                        : new int[]{0x14FFFFFF, 0x3A1C2333, 0x5C131825});
+                        ? new int[]{0x18FFFFFF, 0x38212838, 0x58161B28}
+                        : new int[]{0x10FFFFFF, 0x301C2333, 0x50131825});
         background.setCornerRadius(dp(12));
         background.setStroke(
                 dp(focused ? 2 : 1),
-                focused ? 0xFFE6DFFF : selected ? 0x608B94AD : 0x4C7C89B2);
+                focused ? 0xFFDCD5F2 : selected ? 0x4C8B94AD : 0x407C89B2);
         card.setBackground(background);
         card.setElevation(dp(focused ? 8 : selected ? 4 : 2));
         card.setTranslationZ(dp(focused ? 3 : 0));
-        card.setScaleX(focused ? 1.02f : 1f);
-        card.setScaleY(focused ? 1.02f : 1f);
+        animateFocusScale(card, focused ? 1.015f : 1f, 120);
     }
 
     private void stylePrimaryButton(View button, boolean focused) {
-        GradientDrawable background = new GradientDrawable();
+        int top = withAlpha(blendColor(0xFF644FA0, glassAccentColor, 0.42f), focused ? 0xE0 : 0xA9);
+        int bottom = withAlpha(blendColor(0xFF42366D, glassAccentColor, 0.28f), focused ? 0xCA : 0x8F);
+        GradientDrawable background = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{top, bottom});
         background.setCornerRadius(dp(12));
-        background.setColor(focused ? 0xFF654CA1 : 0xA52A2144);
-        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFFFFFFF : 0x806E5AA4);
+        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFF0EBFF : 0x706E5AA4);
         button.setBackground(background);
-        button.setScaleX(focused ? 1.015f : 1f);
-        button.setScaleY(focused ? 1.015f : 1f);
+        button.setElevation(dp(focused ? 8 : 3));
+        animateFocusScale(button, focused ? 1.01f : 1f, 120);
     }
 
     private void styleCompactButton(View button, boolean focused) {
-        GradientDrawable background = new GradientDrawable();
+        int top = withAlpha(blendColor(0xFF58478F, glassAccentColor, 0.38f), focused ? 0xC7 : 0x32);
+        int bottom = withAlpha(blendColor(0xFF342B59, glassAccentColor, 0.22f), focused ? 0xB0 : 0x65);
+        GradientDrawable background = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{top, bottom});
         background.setCornerRadius(dp(10));
-        background.setColor(focused ? 0xFF56418F : 0x65181C2B);
-        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFFFFFFF : 0x387C89B2);
+        background.setStroke(dp(focused ? 2 : 1), focused ? 0xFFE9E3FF : 0x387C89B2);
         button.setBackground(background);
+        animateFocusScale(button, focused ? 1.008f : 1f, 110);
+    }
+
+    private void animateFocusScale(View view, float scale, long duration) {
+        view.animate().cancel();
+        if (reducedMotion || !view.isLaidOut()) {
+            view.setScaleX(scale);
+            view.setScaleY(scale);
+        } else {
+            view.animate().scaleX(scale).scaleY(scale).setDuration(duration).start();
+        }
+    }
+
+    private void refreshGlassStyles() {
+        refreshCardRow(controllerRow, false);
+        refreshCardRow(appRow, false);
+        refreshCardRow(hostRow, true);
+        if (resumeButton != null) stylePrimaryButton(resumeButton, resumeButton.hasFocus());
+        if (sessionButton != null) styleCompactButton(sessionButton, sessionButton.hasFocus());
+        if (settingsButton != null) styleCompactButton(settingsButton, settingsButton.hasFocus());
+        if (sidePanel != null) {
+            for (int i = 0; i < sidePanel.getChildCount(); i++) {
+                View child = sidePanel.getChildAt(i);
+                if (child.isFocusable()) styleCompactButton(child, child.hasFocus());
+            }
+        }
+    }
+
+    private void refreshCardRow(LinearLayout row, boolean hosts) {
+        if (row == null) return;
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            if (!child.isFocusable()) continue;
+            if (hosts) styleHostCard(child, child.hasFocus(), child == selectedHostCard);
+            else styleCard(child, child.hasFocus());
+        }
+    }
+
+    private static int blendColor(int from, int to, float amount) {
+        float t = Math.max(0f, Math.min(1f, amount));
+        return Color.rgb(
+                Math.round(Color.red(from) + (Color.red(to) - Color.red(from)) * t),
+                Math.round(Color.green(from) + (Color.green(to) - Color.green(from)) * t),
+                Math.round(Color.blue(from) + (Color.blue(to) - Color.blue(from)) * t));
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
     }
 
     private TextView sectionLabel(String value) { return text(value, 13, 0xFF9CA6C5, true); }
@@ -1609,6 +2069,7 @@ public final class LauncherActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(value); view.setTextSize(size); view.setTextColor(color);
         view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setIncludeFontPadding(false);
         if (bold) view.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
         return view;
     }
@@ -1617,7 +2078,7 @@ public final class LauncherActivity extends Activity {
         view.setHorizontalScrollBarEnabled(false);
         view.setClipToPadding(false);
         view.setClipChildren(false);
-        view.setPadding(dp(12), 0, dp(12), 0);
+        view.setPadding(0, 0, dp(12), 0);
         view.setFocusable(false);
         return view;
     }
@@ -1727,11 +2188,12 @@ public final class LauncherActivity extends Activity {
         private boolean running;
         private long startedAt;
         GenerativeSlideshow(android.content.Context context) { super(context); }
-        void start() { running = true; startedAt = SystemClock.uptimeMillis(); invalidate(); }
+        void start(boolean animate) { running = animate; startedAt = SystemClock.uptimeMillis(); invalidate(); }
+        long getStartedAt() { return startedAt; }
         void stop() { running = false; }
         @Override protected void onDraw(Canvas canvas) {
             int w = getWidth(), h = getHeight();
-            float phase = (SystemClock.uptimeMillis() - startedAt) / 9000f;
+            float phase = running ? (SystemClock.uptimeMillis() - startedAt) / 9000f : 0f;
             paint.setShader(new LinearGradient(0, 0, w, h,
                     new int[]{0xFF090B14, 0xFF171633, 0xFF311A58}, null, Shader.TileMode.CLAMP));
             canvas.drawRect(0, 0, w, h, paint);

@@ -42,8 +42,10 @@
 
     <application
         android:allowBackup="false"
+        android:appCategory="game"
         android:banner="@drawable/launcher_banner"
         android:icon="@drawable/launcher_icon"
+        android:isGame="true"
         android:label="Wake &amp; Play"
         android:theme="@style/LauncherTheme">
         <activity

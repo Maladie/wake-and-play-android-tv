@@ -63,7 +63,7 @@ final class ControllerActions {
     static void identify(int deviceId, Handler handler, ResultCallback callback) {
         InputDevice device = InputDevice.getDevice(deviceId);
         if (device == null) {
-            callback.onResult(false, "Kontroler nie jest już połączony.");
+            callback.onResult(false, "The controller is no longer connected.");
             return;
         }
         boolean vibrationStarted = vibrate(device);
@@ -71,9 +71,9 @@ final class ControllerActions {
         Log.i(TAG, "Identify controller id=" + deviceId + " vibration=" + vibrationStarted
                 + " lights=" + lightsStarted);
         if (vibrationStarted || lightsStarted) {
-            callback.onResult(true, lightsStarted ? "Kontroler miga i wibruje." : "Kontroler wibruje.");
+            callback.onResult(true, lightsStarted ? "The controller is flashing and vibrating." : "The controller is vibrating.");
         } else {
-            callback.onResult(false, "Ten kontroler nie udostępnia wibracji ani sterowania LED dla Androida.");
+            callback.onResult(false, "This controller does not expose vibration or LED controls to Android.");
         }
     }
 
@@ -143,7 +143,7 @@ final class ControllerActions {
             Method publicDisconnect = BluetoothDevice.class.getMethod("disconnect");
             Object value = publicDisconnect.invoke(device);
             boolean success = !(value instanceof Boolean) || (Boolean) value;
-            callback.onResult(success, success ? "Kontroler został wyłączony." : "System odrzucił wyłączenie kontrolera.");
+            callback.onResult(success, success ? "The controller was powered off." : "The system rejected the power-off request.");
             return;
         } catch (NoSuchMethodException ignored) {
             // Older Android versions expose disconnect only through the hidden HID Host profile.
@@ -152,7 +152,7 @@ final class ControllerActions {
         }
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
         if (adapter == null) {
-            callback.onResult(false, "Bluetooth nie jest dostępny na tym urządzeniu.");
+            callback.onResult(false, "Bluetooth is not available on this device.");
             return;
         }
         boolean requested = adapter.getProfileProxy(context, new BluetoothProfile.ServiceListener() {
@@ -171,14 +171,14 @@ final class ControllerActions {
                     adapter.closeProfileProxy(profile, proxy);
                 }
                 callback.onResult(success, success
-                        ? "Kontroler został wyłączony."
-                        : "Sony/Android zablokował wyłączenie kontrolera." + suffix(detail));
+                        ? "The controller was powered off."
+                        : "Sony/Android blocked the controller power-off request." + suffix(detail));
             }
             @Override public void onServiceDisconnected(int profile) {
-                callback.onResult(false, "Usługa Bluetooth została rozłączona.");
+                callback.onResult(false, "The Bluetooth service disconnected.");
             }
         }, HID_HOST_PROFILE);
-        if (!requested) callback.onResult(false, "Nie udało się połączyć z usługą kontrolerów Bluetooth.");
+        if (!requested) callback.onResult(false, "Could not connect to the Bluetooth controller service.");
     }
 
     @SuppressLint("MissingPermission")
@@ -194,10 +194,10 @@ final class ControllerActions {
             removeBond.setAccessible(true);
             Object value = removeBond.invoke(device);
             boolean success = !(value instanceof Boolean) || (Boolean) value;
-            callback.onResult(success, success ? "Rozpoczęto odparowywanie kontrolera." : "Sony/Android odrzucił odparowanie kontrolera.");
+            callback.onResult(success, success ? "Controller unpairing started." : "Sony/Android rejected the unpair request.");
         } catch (Exception error) {
             Log.w(TAG, "Bluetooth removeBond blocked", error);
-            callback.onResult(false, "Sony/Android zablokował odparowanie kontrolera." + suffix(rootMessage(error)));
+            callback.onResult(false, "Sony/Android blocked controller unpairing." + suffix(rootMessage(error)));
         }
     }
 
@@ -256,8 +256,8 @@ final class ControllerActions {
     }
 
     private static String unresolvedMessage(InputDevice input) {
-        return input == null ? "Kontroler nie jest już połączony."
-                : "Nie można jednoznacznie powiązać wybranego pada z urządzeniem Bluetooth. Żaden inny kontroler nie został zmieniony.";
+        return input == null ? "The controller is no longer connected."
+                : "The selected gamepad could not be matched unambiguously to a Bluetooth device. No other controller was changed.";
     }
 
     private static String rootMessage(Throwable error) {
