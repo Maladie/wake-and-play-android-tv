@@ -37,11 +37,27 @@ final class HostGatewayClient {
         final String endpoint;
         final String token;
         final String certificateSha256;
+        final String profileId;
 
         Connection(String endpoint, String token, String certificateSha256) {
+            this(endpoint, token, certificateSha256, "default");
+        }
+
+        Connection(String endpoint, String token, String certificateSha256,
+                   String profileId) {
             this.endpoint = trimSlash(endpoint);
             this.token = token;
             this.certificateSha256 = normalizeFingerprint(certificateSha256);
+            String normalizedProfile = profileId == null || profileId.trim().isEmpty() ?
+                    "default" : profileId.trim();
+            if (!normalizedProfile.matches("[A-Za-z0-9._-]{1,64}")) {
+                throw new IllegalArgumentException("Invalid integration profile ID");
+            }
+            this.profileId = normalizedProfile;
+        }
+
+        Connection withProfile(String profileId) {
+            return new Connection(endpoint, token, certificateSha256, profileId);
         }
     }
 
@@ -64,6 +80,45 @@ final class HostGatewayClient {
             this.vibepolloFix = vibepolloFix;
             this.discord = discord;
             this.virtualHere = virtualHere;
+        }
+    }
+
+    static final class IntegrationProfile {
+        final String id;
+        final String name;
+        final boolean discordBridgeOnline;
+        final boolean discordRpcConnected;
+        final boolean discordAuthenticated;
+        final boolean vibepolloBridgeOnline;
+        final boolean virtualHereAvailable;
+
+        IntegrationProfile(String id, String name, boolean discordBridgeOnline,
+                           boolean discordRpcConnected, boolean discordAuthenticated,
+                           boolean vibepolloBridgeOnline, boolean virtualHereAvailable) {
+            this.id = id;
+            this.name = name;
+            this.discordBridgeOnline = discordBridgeOnline;
+            this.discordRpcConnected = discordRpcConnected;
+            this.discordAuthenticated = discordAuthenticated;
+            this.vibepolloBridgeOnline = vibepolloBridgeOnline;
+            this.virtualHereAvailable = virtualHereAvailable;
+        }
+    }
+
+    static final class IntegrationProfiles {
+        final List<IntegrationProfile> profiles;
+        final String suggestedProfileId;
+
+        IntegrationProfiles(List<IntegrationProfile> profiles, String suggestedProfileId) {
+            this.profiles = Collections.unmodifiableList(profiles);
+            this.suggestedProfileId = suggestedProfileId;
+        }
+
+        IntegrationProfile find(String profileId) {
+            for (IntegrationProfile profile : profiles) {
+                if (profile.id.equals(profileId)) return profile;
+            }
+            return null;
         }
     }
 
@@ -332,6 +387,31 @@ final class HostGatewayClient {
         return new Capabilities(available(capabilities, "vibepollo_fix"),
                 available(capabilities, "discord"),
                 available(capabilities, "virtualhere"));
+    }
+
+    IntegrationProfiles getIntegrationProfiles(Connection connection) throws IOException {
+        JSONObject response = request(connection.endpoint, "/api/v1/profiles", "GET",
+                null, connection, pinnedTrust(connection), 15_000);
+        JSONArray values = response.optJSONArray("profiles");
+        List<IntegrationProfile> profiles = new ArrayList<>();
+        if (values != null) {
+            for (int index = 0; index < values.length(); index++) {
+                JSONObject value = values.optJSONObject(index);
+                if (value == null) continue;
+                String id = value.optString("id", "").trim();
+                if (!id.matches("[A-Za-z0-9._-]{1,64}")) continue;
+                String name = value.optString("name", id).trim();
+                profiles.add(new IntegrationProfile(
+                        id, name.isEmpty() ? id : name,
+                        value.optBoolean("discord_bridge_online", false),
+                        value.optBoolean("discord_rpc_connected", false),
+                        value.optBoolean("discord_authenticated", false),
+                        value.optBoolean("vibepollo_bridge_online", false),
+                        value.optBoolean("virtualhere_available", false)));
+            }
+        }
+        return new IntegrationProfiles(profiles,
+                response.optString("suggested_profile_id", ""));
     }
 
     RepairStatus getVibepolloRepairStatus(Connection connection) throws IOException {
@@ -723,6 +803,7 @@ final class HostGatewayClient {
             http.setRequestProperty("Connection", "close");
             if (connection != null) {
                 http.setRequestProperty("Authorization", "Bearer " + connection.token);
+                http.setRequestProperty("X-WakePlay-Profile", connection.profileId);
             }
             if ("POST".equals(method)) {
                 byte[] payload = (body != null ? body : new JSONObject()).toString()

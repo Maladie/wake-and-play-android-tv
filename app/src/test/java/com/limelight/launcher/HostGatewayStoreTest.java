@@ -13,6 +13,16 @@ public class HostGatewayStoreTest {
         assertNotEquals(
                 HostGatewayStore.key("living-room-host", "token"),
                 HostGatewayStore.key("office-host", "token"));
+        assertEquals("living-room-host.integration_profile",
+                HostGatewayStore.key("living-room-host", "integration_profile"));
+    }
+
+    @Test
+    public void gatewayConnectionCarriesValidatedIntegrationProfile() {
+        HostGatewayClient.Connection connection = new HostGatewayClient.Connection(
+                "https://192.0.2.1:8785", "token", "aa", "gry");
+        assertEquals("gry", connection.profileId);
+        assertEquals("basia", connection.withProfile("basia").profileId);
     }
 
     @Test

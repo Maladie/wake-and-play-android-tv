@@ -3,6 +3,7 @@
 param(
     [ValidatePattern('^[A-Za-z0-9._-]{1,64}$')]
     [string]$ProfileId = "default",
+    [string]$ProfileName = "",
     [int]$DiscordPort = 8765,
     [int]$VibepolloPort = 8775,
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "WakePlayHost\profiles"),
@@ -15,6 +16,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$profileDisplayName = if ([string]::IsNullOrWhiteSpace($ProfileName)) {
+    $ProfileId
+} else {
+    $ProfileName.Trim()
+}
+if ($profileDisplayName.Length -gt 80 -or $profileDisplayName -match '[\x00-\x1f\x7f]') {
+    throw "Profile name must contain at most 80 printable characters."
+}
 
 if ($DiscordPort -lt 1024 -or $DiscordPort -gt 65535 -or
     $VibepolloPort -lt 1024 -or $VibepolloPort -gt 65535) {
@@ -115,6 +124,7 @@ if (-not $SkipGatewayRegistration) {
             $gateway | Add-Member -NotePropertyName profiles -NotePropertyValue ([pscustomobject]@{})
         }
         $entry = [pscustomobject]@{
+            name = $profileDisplayName
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
         }
@@ -130,6 +140,7 @@ if (-not $SkipGatewayRegistration) {
         $registrationPath = Join-Path $profileRoot "gateway-profile-registration.json"
         [ordered]@{
             profile_id = $ProfileId
+            name = $profileDisplayName
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
         } | ConvertTo-Json | Set-Content -LiteralPath $registrationPath -Encoding UTF8

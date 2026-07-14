@@ -7,6 +7,7 @@
   "vibepollo_bridge": "http://127.0.0.1:8775",
   "profiles": {
     "default": {
+      "name": "Default",
       "discord_bridge": "http://127.0.0.1:8765",
       "vibepollo_bridge": "http://127.0.0.1:8775"
     }

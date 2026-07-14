@@ -31,6 +31,7 @@ per-profile Bridge when its credentials or runtime state differ.
 - `GET /api/v1/hello` - unauthenticated discovery response.
 - `POST /api/v1/pair` - exchanges a short-lived pairing code for a client token.
 - `GET /api/v1/capabilities` - reports Gateway, selected profile and Bridges.
+- `GET /api/v1/profiles` - lists safe profile names and Bridge health summaries.
 - `GET /api/v1/vibepollo/repair/status` - Vibepollo health summary.
 - `POST /api/v1/vibepollo/repair/{restart|reset-display|export-logs}` - repair action.
 - `GET /api/v1/discord/status` - Bridge, RPC and authorization status.

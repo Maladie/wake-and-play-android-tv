@@ -33,7 +33,8 @@ final class HostGatewayStore {
         String token = preferences.getString(key(hostUuid, "token"), "");
         String certificate = preferences.getString(key(hostUuid, "certificate"), "");
         if (endpoint.isEmpty() || token.isEmpty() || certificate.isEmpty()) return null;
-        return new HostGatewayClient.Connection(endpoint, token, certificate);
+        return new HostGatewayClient.Connection(endpoint, token, certificate,
+                selectedIntegrationProfileId(hostUuid));
     }
 
     void save(String hostUuid, HostGatewayClient.Connection connection) {
@@ -42,23 +43,43 @@ final class HostGatewayStore {
                 .putString(key(hostUuid, "endpoint"), connection.endpoint)
                 .putString(key(hostUuid, "token"), connection.token)
                 .putString(key(hostUuid, "certificate"), connection.certificateSha256)
+                .putString(key(hostUuid, "integration_profile"), connection.profileId)
                 .apply();
     }
 
     void remove(String hostUuid) {
-        preferences.edit()
+        SharedPreferences.Editor editor = preferences.edit()
                 .remove(key(hostUuid, "paired"))
                 .remove(key(hostUuid, "endpoint"))
                 .remove(key(hostUuid, "token"))
                 .remove(key(hostUuid, "certificate"))
+                .remove(key(hostUuid, "integration_profile"))
                 .remove(key(hostUuid, "discord_auto_connect"))
                 .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "auto_connect"))
                 .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "auto_join_last"))
                 .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "last_channel_id"))
                 .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "last_guild_id"))
                 .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "last_guild_name"))
-                .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "last_channel_name"))
-                .apply();
+                .remove(discordKey(hostUuid, DEFAULT_DISCORD_PROFILE_ID, "last_channel_name"));
+        String discordPrefix = hostUuid + ".discord.";
+        for (String preferenceKey : preferences.getAll().keySet()) {
+            if (preferenceKey.startsWith(discordPrefix)) editor.remove(preferenceKey);
+        }
+        editor.apply();
+    }
+
+    String selectedIntegrationProfileId(String hostUuid) {
+        if (hostUuid == null) return DEFAULT_DISCORD_PROFILE_ID;
+        String value = preferences.getString(key(hostUuid, "integration_profile"),
+                DEFAULT_DISCORD_PROFILE_ID);
+        return value != null && value.matches("[A-Za-z0-9._-]{1,64}") ?
+                value : DEFAULT_DISCORD_PROFILE_ID;
+    }
+
+    void setSelectedIntegrationProfileId(String hostUuid, String profileId) {
+        if (hostUuid == null || profileId == null ||
+                !profileId.matches("[A-Za-z0-9._-]{1,64}")) return;
+        preferences.edit().putString(key(hostUuid, "integration_profile"), profileId).apply();
     }
 
     boolean isDiscordAutoConnectEnabled(String hostUuid) {
@@ -97,9 +118,13 @@ final class HostGatewayStore {
     }
 
     void setDiscordAutoJoinLastEnabled(String hostUuid, boolean enabled) {
-        if (hostUuid == null) return;
+        setDiscordAutoJoinLastEnabled(hostUuid, DEFAULT_DISCORD_PROFILE_ID, enabled);
+    }
+
+    void setDiscordAutoJoinLastEnabled(String hostUuid, String profileId, boolean enabled) {
+        if (hostUuid == null || profileId == null) return;
         preferences.edit().putBoolean(discordKey(hostUuid,
-                DEFAULT_DISCORD_PROFILE_ID, "auto_join_last"), enabled).apply();
+                profileId, "auto_join_last"), enabled).apply();
     }
 
     DiscordChannelSelection loadLastDiscordChannel(String hostUuid) {
@@ -122,10 +147,17 @@ final class HostGatewayStore {
 
     void saveLastDiscordChannel(String hostUuid, String channelId, String guildId,
                                 String guildName, String channelName) {
+        saveLastDiscordChannel(hostUuid, DEFAULT_DISCORD_PROFILE_ID, channelId,
+                guildId, guildName, channelName);
+    }
+
+    void saveLastDiscordChannel(String hostUuid, String profileId,
+                                String channelId, String guildId,
+                                String guildName, String channelName) {
         if (hostUuid == null || channelId == null || channelId.isEmpty() ||
+                profileId == null ||
                 guildId == null || guildId.isEmpty() ||
                 channelName == null || channelName.isEmpty()) return;
-        String profileId = DEFAULT_DISCORD_PROFILE_ID;
         preferences.edit()
                 .putString(discordKey(hostUuid, profileId, "last_channel_id"), channelId)
                 .putString(discordKey(hostUuid, profileId, "last_guild_id"), guildId)

@@ -35,13 +35,16 @@ Additional profiles require explicit unique ports:
 
 ```powershell
 C:\Tools\WakePlayHost\install\Install-WakePlayProfile.ps1 `
-  -ProfileId basia -DiscordPort 8865 -VibepolloPort 8875
+  -ProfileId basia -ProfileName "Basia" -DiscordPort 8865 -VibepolloPort 8875
 ```
 
 The profile installer copies clean Bridge sources into the current user's
 `LocalAppData`, runs interactive credential configuration when necessary,
 registers per-user logon tasks and adds the loopback endpoints to the Gateway
 profile registry. Restart the Gateway after changing the registry.
+
+Wake & Play lists the registered display names under Host integrations and
+stores the selected profile independently for every Moonlight host.
 
 Authenticated API calls may select a profile with `X-WakePlay-Profile`. When
 the header is absent, Gateway uses `default` for backward compatibility.

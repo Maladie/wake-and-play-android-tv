@@ -59,6 +59,33 @@ class GatewayStateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             state.select_profile("../default")
 
+    def test_profile_summary_reports_health_without_bridge_addresses(self):
+        state = GatewayState(self.config_path, None)
+        state.config["profiles"]["basia"] = {
+            "name": "Basia",
+            "discord_bridge": "http://127.0.0.1:8865",
+            "vibepollo_bridge": "http://127.0.0.1:8875",
+        }
+        state.discord_status = lambda: {
+            "bridge_online": True,
+            "rpc_connected": state.profile_id == "basia",
+            "authenticated": state.profile_id == "basia",
+            "error": "",
+        }
+        state.proxy = lambda name, path, timeout=2.5: (
+            True, {"installed": state.profile_id == "basia"})
+
+        summary = state.profiles_summary()
+
+        self.assertEqual("basia", summary["suggested_profile_id"])
+        self.assertEqual("default", state.profile_id)
+        basia = next(item for item in summary["profiles"] if item["id"] == "basia")
+        self.assertEqual("Basia", basia["name"])
+        self.assertTrue(basia["discord_rpc_connected"])
+        self.assertTrue(basia["virtualhere_available"])
+        self.assertNotIn("discord_bridge", basia)
+        self.assertNotIn("vibepollo_bridge", basia)
+
     def test_idempotent_action_runs_once(self):
         state = GatewayState(self.config_path, None)
         calls = []

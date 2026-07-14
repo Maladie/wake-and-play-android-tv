@@ -20,6 +20,7 @@ import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.StateListDrawable;
 import android.graphics.drawable.TransitionDrawable;
 import android.hardware.BatteryState;
 import android.hardware.input.InputManager;
@@ -109,6 +110,12 @@ public final class LauncherActivity extends Activity {
     private static final String PREF_LAST_LAUNCH_AT = "last_launch_at";
     private static final String PREF_UI_SOUNDS = "ui_sounds";
     private static final String PREF_REDUCED_MOTION = "reduced_motion";
+    private static final int DISCORD_BLURPLE = 0xFF5865F2;
+    private static final int DISCORD_GREEN = 0xFF23A559;
+    private static final int DISCORD_RED = 0xFFDA373C;
+    private static final int DISCORD_ORANGE = 0xFFF0A61B;
+    private static final int DISCORD_SURFACE = 0xFF313338;
+    private static final int DISCORD_TOOL = 0xFF404249;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
@@ -1839,6 +1846,65 @@ public final class LauncherActivity extends Activity {
         return action;
     }
 
+    private TextView discordAction(String label, int color) {
+        TextView action = text(label, 14, Color.WHITE, true);
+        action.setTag("discord_action");
+        action.setFocusable(true);
+        action.setClickable(true);
+        action.setSoundEffectsEnabled(uiSoundsEnabled);
+        action.setMinHeight(dp(48));
+        action.setGravity(Gravity.CENTER_VERTICAL);
+        action.setPadding(dp(16), dp(8), dp(16), dp(8));
+        action.setBackground(discordActionBackground(color));
+        action.setOnFocusChangeListener((view, focused) -> {
+            action.setTextColor(focused ? Color.WHITE : 0xFFE3E5E8);
+            action.setElevation(dp(focused ? 8 : 2));
+        });
+        return action;
+    }
+
+    private Drawable discordActionBackground(int color) {
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed},
+                discordActionShape(blendColor(color, Color.WHITE, 0.18f), true));
+        states.addState(new int[]{android.R.attr.state_focused},
+                discordActionShape(color, true));
+        states.addState(new int[0],
+                discordActionShape(blendColor(color, 0xFF111214, 0.30f), false));
+        return states;
+    }
+
+    private Drawable discordActionShape(int color, boolean emphasized) {
+        GradientDrawable background = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{withAlpha(color, 0xF2), withAlpha(blendColor(color, 0xFF111214, 0.20f), 0xF2)});
+        background.setCornerRadius(dp(9));
+        background.setStroke(dp(emphasized ? 2 : 1),
+                emphasized ? 0xFFFFFFFF : 0x384F545C);
+        return background;
+    }
+
+    private TextView discordSection(String label) {
+        TextView section = text(label, 11, 0xFFB5BAC1, true);
+        section.setLetterSpacing(0.08f);
+        section.setPadding(dp(4), dp(13), dp(4), dp(5));
+        section.setFocusable(false);
+        return section;
+    }
+
+    private void pulseDiscordAction(View action) {
+        if (action == null) return;
+        action.animate().cancel();
+        if (reducedMotion) {
+            action.setAlpha(0.72f);
+            action.postDelayed(() -> action.setAlpha(1f), 100);
+        } else {
+            action.animate().scaleX(0.97f).scaleY(0.97f).alpha(0.78f)
+                    .setDuration(70).withEndAction(() -> action.animate()
+                            .scaleX(1f).scaleY(1f).alpha(1f).setDuration(110).start()).start();
+        }
+    }
+
     private void putHostGatewayExtras(Intent intent, Host host) {
         if (intent == null || host == null || hostGatewayStore == null) return;
         HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
@@ -1846,8 +1912,7 @@ public final class LauncherActivity extends Activity {
         intent.putExtra(EXTRA_HOST_GATEWAY_ENDPOINT, connection.endpoint);
         intent.putExtra(EXTRA_HOST_GATEWAY_TOKEN, connection.token);
         intent.putExtra(EXTRA_HOST_GATEWAY_CERTIFICATE, connection.certificateSha256);
-        intent.putExtra(EXTRA_DISCORD_PROFILE_ID,
-                HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID);
+        intent.putExtra(EXTRA_DISCORD_PROFILE_ID, connection.profileId);
     }
 
     private LinearLayout panelActionRow(View... actions) {
@@ -1896,7 +1961,11 @@ public final class LauncherActivity extends Activity {
     private void showSidePanel(String eyebrow, String title, String details,
                                Runnable backAction, View... actions) {
         if (modalLayer == null) return;
-        if (modalLayer.getVisibility() != View.VISIBLE) lastContentFocus = getCurrentFocus();
+        boolean wasVisible = modalLayer.getVisibility() == View.VISIBLE;
+        View previousFocus = getCurrentFocus();
+        String previousFocusKey = wasVisible ? sidePanelFocusKey(previousFocus) : null;
+        int previousScrollY = wasVisible ? sidePanelScroll.getScrollY() : 0;
+        if (!wasVisible) lastContentFocus = previousFocus;
         sidePanelBackAction = backAction;
         sidePanel.removeAllViews();
 
@@ -1931,18 +2000,50 @@ public final class LauncherActivity extends Activity {
 
         rebuildSidePanelFocusNavigation();
         View firstAction = firstVisibleSidePanelAction();
+        View restoredAction = previousFocusKey == null
+                ? null : findSidePanelAction(previousFocusKey);
 
         modalLayer.setVisibility(View.VISIBLE);
         modalLayer.setAlpha(1f);
         sidePanelScroll.animate().cancel();
-        sidePanelScroll.scrollTo(0, 0);
-        if (reducedMotion) {
+        sidePanelScroll.scrollTo(0, wasVisible && restoredAction != null ? previousScrollY : 0);
+        if (reducedMotion || wasVisible) {
             sidePanelScroll.setTranslationX(0f);
         } else {
             sidePanelScroll.setTranslationX(dp(510));
             sidePanelScroll.animate().translationX(0f).setDuration(180).start();
         }
-        if (firstAction != null) firstAction.post(firstAction::requestFocus);
+        View focusTarget = restoredAction != null ? restoredAction : firstAction;
+        if (focusTarget != null) focusTarget.post(focusTarget::requestFocus);
+    }
+
+    private String sidePanelFocusKey(View view) {
+        if (view == null || !isDescendantOf(view, sidePanel)) return null;
+        CharSequence description = view.getContentDescription();
+        if (description != null && description.length() > 0) return description.toString();
+        if (view instanceof TextView) {
+            CharSequence label = ((TextView) view).getText();
+            if (label != null && label.length() > 0) return label.toString();
+        }
+        return null;
+    }
+
+    private boolean isDescendantOf(View view, ViewGroup ancestor) {
+        android.view.ViewParent parent = view.getParent();
+        while (parent instanceof View) {
+            if (parent == ancestor) return true;
+            parent = parent.getParent();
+        }
+        return false;
+    }
+
+    private View findSidePanelAction(String focusKey) {
+        for (List<View> row : sidePanelFocusRows()) {
+            for (View action : row) {
+                if (focusKey.equals(sidePanelFocusKey(action))) return action;
+            }
+        }
+        return null;
     }
 
     private View firstVisibleSidePanelAction() {
@@ -2084,6 +2185,8 @@ public final class LauncherActivity extends Activity {
 
         int request = integrationPanelRequest.incrementAndGet();
         TextView status = panelStatus("Gateway: checking…");
+        TextView profileAction = panelAction("INTEGRATION PROFILE  ·  " +
+                connection.profileId.toUpperCase(Locale.ROOT) + "  ›");
         TextView vibepolloStatus = panelStatus("Vibepollo Bridge: checking…");
         TextView discordStatus = panelStatus("Discord Bridge: checking…");
         TextView vibepolloAction = panelAction("VIBEPOLLO FIX  ›");
@@ -2092,6 +2195,7 @@ public final class LauncherActivity extends Activity {
         TextView unpairAction = panelAction("FORGET THIS GATEWAY");
         vibepolloAction.setVisibility(View.GONE);
         discordAction.setVisibility(View.GONE);
+        profileAction.setOnClickListener(v -> showIntegrationProfilesPanel(host));
         vibepolloAction.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
         discordAction.setOnClickListener(v -> showDiscordPanel(
                 host, connection, this::showIntegrationsPanel));
@@ -2100,15 +2204,42 @@ public final class LauncherActivity extends Activity {
         showSidePanel("HOST INTEGRATIONS", host.name,
                 "Paired gateway: " + connection.endpoint,
                 this::showOptionsPanel,
-                status, vibepolloStatus, discordStatus,
+                status, profileAction, vibepolloStatus, discordStatus,
                 vibepolloAction, discordAction, refreshAction, unpairAction);
 
         executor.submit(() -> {
             try {
+                HostGatewayClient.IntegrationProfiles profiles = null;
+                try {
+                    profiles = hostGatewayClient.getIntegrationProfiles(connection);
+                } catch (IOException ignored) {
+                    // Older Gateways do not expose the profile catalog. Their
+                    // single default Bridge remains usable during migration.
+                }
+                HostGatewayClient.IntegrationProfile selectedProfile = profiles != null ?
+                        profiles.find(connection.profileId) : null;
+                if (profiles != null && selectedProfile == null) {
+                    mainHandler.post(() -> {
+                        if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                        status.setText("Gateway: online\nSelected profile is no longer registered.");
+                        profileAction.setText("SELECT INTEGRATION PROFILE  ›");
+                        vibepolloStatus.setText("Vibepollo Bridge: select a profile");
+                        discordStatus.setText("Discord Bridge: select a profile");
+                    });
+                    return;
+                }
                 HostGatewayClient.Capabilities capabilities = hostGatewayClient.getCapabilities(connection);
+                HostGatewayClient.IntegrationProfiles loadedProfiles = profiles;
+                HostGatewayClient.IntegrationProfile loadedProfile = selectedProfile;
                 mainHandler.post(() -> {
                     if (!isCurrentIntegrationPanel(request, host.uuid)) return;
                     status.setText("Gateway: online");
+                    if (loadedProfile != null) {
+                        boolean active = loadedProfiles.suggestedProfileId.equals(loadedProfile.id);
+                        profileAction.setText("INTEGRATION PROFILE  ·  " +
+                                loadedProfile.name.toUpperCase(Locale.ROOT) +
+                                (active ? "  ·  ACTIVE" : "") + "  ›");
+                    }
                     vibepolloStatus.setText("Vibepollo Bridge: " +
                             (capabilities.vibepolloFix ? "online" : "offline"));
                     discordStatus.setText("Discord Bridge: " +
@@ -2126,6 +2257,81 @@ public final class LauncherActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void showIntegrationProfilesPanel(Host host) {
+        clearDiscordControllerShortcuts();
+        if (host == null || host.uuid == null) return;
+        HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
+        if (connection == null) {
+            showIntegrationsPanel();
+            return;
+        }
+        int request = integrationPanelRequest.incrementAndGet();
+        TextView status = panelStatus("Loading profiles from Gateway…");
+        TextView retry = panelAction("REFRESH PROFILES");
+        retry.setOnClickListener(v -> showIntegrationProfilesPanel(host));
+        showSidePanel("HOST INTEGRATIONS", "Integration profile",
+                "Choose which Windows session, Discord account and Vibepollo configuration " +
+                        "Wake & Play should control on this host.",
+                this::showIntegrationsPanel, status, retry);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.IntegrationProfiles profiles =
+                        hostGatewayClient.getIntegrationProfiles(connection);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    renderIntegrationProfilesPanel(host, profiles);
+                });
+            } catch (IOException error) {
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    status.setText("Profiles unavailable\n" + friendlyGatewayError(error) +
+                            "\nUpdate and restart the Wake & Play Host Gateway if needed.");
+                });
+            }
+        });
+    }
+
+    private void renderIntegrationProfilesPanel(
+            Host host, HostGatewayClient.IntegrationProfiles profiles) {
+        String selectedId = hostGatewayStore.selectedIntegrationProfileId(host.uuid);
+        List<View> actions = new ArrayList<>();
+        if (profiles.profiles.isEmpty()) {
+            actions.add(panelStatus("No integration profiles are registered on this host."));
+        } else {
+            for (HostGatewayClient.IntegrationProfile profile : profiles.profiles) {
+                boolean selected = profile.id.equals(selectedId);
+                boolean suggested = profile.id.equals(profiles.suggestedProfileId);
+                StringBuilder label = new StringBuilder();
+                label.append(selected ? "✓  " : "")
+                        .append(profile.name.toUpperCase(Locale.ROOT));
+                if (suggested) label.append("  ·  ACTIVE");
+                label.append("\nDISCORD ").append(
+                        profile.discordRpcConnected ? "CONNECTED" :
+                                profile.discordBridgeOnline ? "READY" : "OFFLINE");
+                label.append("  ·  VIBEPOLLO ").append(
+                        profile.vibepolloBridgeOnline ? "ONLINE" : "OFFLINE");
+                if (profile.virtualHereAvailable) label.append("  ·  USB READY");
+                TextView action = panelAction(label.toString());
+                action.setContentDescription("Integration profile " + profile.name +
+                        (selected ? ", selected" : ""));
+                action.setOnClickListener(v -> {
+                    hostGatewayStore.setSelectedIntegrationProfileId(host.uuid, profile.id);
+                    clearDiscordControllerShortcuts();
+                    refreshCommunityAvailability(host);
+                    showIntegrationsPanel();
+                });
+                actions.add(action);
+            }
+        }
+        TextView refresh = panelAction("REFRESH PROFILES");
+        refresh.setOnClickListener(v -> showIntegrationProfilesPanel(host));
+        actions.add(refresh);
+        showSidePanel("HOST INTEGRATIONS", "Integration profile",
+                "The selection is saved separately for " + host.name +
+                        " and follows Discord, Vibepollo, audio, USB and the Moonlight overlay.",
+                this::showIntegrationsPanel, actions.toArray(new View[0]));
     }
 
     private boolean isCurrentIntegrationPanel(int request, String hostUuid) {
@@ -2222,7 +2428,9 @@ public final class LauncherActivity extends Activity {
         exportLogs.setOnClickListener(v -> runVibepolloAction(host, connection, "export-logs", "Exporting Vibepollo logs…"));
         refresh.setOnClickListener(v -> showVibepolloFixPanel(host, connection));
         showSidePanel("VIBEPOLLO FIX", host.name,
-                "Repair actions run on the paired host. Restart and display reset always require confirmation.",
+                "Integration profile: " + connection.profileId +
+                        "\nRepair actions run on the paired host. Restart and display reset " +
+                        "always require confirmation.",
                 this::showIntegrationsPanel, status, restart, resetDisplay, exportLogs, refresh);
 
         executor.submit(() -> {
@@ -2286,13 +2494,13 @@ public final class LauncherActivity extends Activity {
     }
 
     private void maybePrepareDiscordForStream(Host host) {
-        String profileKey = host == null || host.uuid == null ? null :
-                host.uuid + ":" + HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID;
-        if (host == null || host.uuid == null ||
-                !hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid) ||
-                !discordAutoConnectAttempted.add(profileKey)) return;
+        if (host == null || host.uuid == null) return;
         HostGatewayClient.Connection connection = hostGatewayStore.load(host.uuid);
         if (connection == null) return;
+        String profileKey = host.uuid + ":" + connection.profileId;
+        if (!hostGatewayStore.isDiscordAutoConnectEnabled(
+                host.uuid, connection.profileId) ||
+                !discordAutoConnectAttempted.add(profileKey)) return;
         executor.submit(() -> {
             try {
                 HostGatewayClient.DiscordStatus status = hostGatewayClient.getDiscordStatus(connection);
@@ -2309,9 +2517,11 @@ public final class LauncherActivity extends Activity {
                     status = hostGatewayClient.getDiscordStatus(connection);
                 }
                 HostGatewayStore.DiscordChannelSelection lastChannel =
-                        hostGatewayStore.loadLastDiscordChannel(host.uuid);
+                        hostGatewayStore.loadLastDiscordChannel(
+                                host.uuid, connection.profileId);
                 if (status.authenticated &&
-                        hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid) &&
+                        hostGatewayStore.isDiscordAutoJoinLastEnabled(
+                                host.uuid, connection.profileId) &&
                         lastChannel != null) {
                     hostGatewayClient.joinDiscordChannel(connection,
                             lastChannel.channelId, lastChannel.guildId,
@@ -2332,6 +2542,12 @@ public final class LauncherActivity extends Activity {
     }
 
     private void showDiscordPanel(Host host, HostGatewayClient.Connection connection) {
+        // The Discord landing page is the server browser. Keep the legacy
+        // dashboard below as a defensive fallback for an invalid connection.
+        if (connection != null) {
+            showDiscordServersPanel(host, connection, false);
+            return;
+        }
         Runnable exitAction = communityExitAction != null
                 ? communityExitAction : () -> hideSidePanel(true);
         int request = integrationPanelRequest.incrementAndGet();
@@ -2365,7 +2581,8 @@ public final class LauncherActivity extends Activity {
         virtualHere.setOnClickListener(v -> showVirtualHerePanel(host, connection, false));
         settings.setOnClickListener(v -> showDiscordSettingsPanel(host, connection));
 
-        showSidePanel("DISCORD", host.name, null,
+        showSidePanel("DISCORD", host.name,
+                "Integration profile: " + connection.profileId,
                 exitAction,
                 status, voiceRow, quickRow,
                 panelActionRow(saved, servers),
@@ -2420,7 +2637,7 @@ public final class LauncherActivity extends Activity {
                         status.setText("ONLINE  ·  " + currentVoice.channelName +
                                 "  ·  " + currentVoice.participants + " participant" +
                                 (currentVoice.participants == 1 ? "" : "s"));
-                        hostGatewayStore.saveLastDiscordChannel(host.uuid,
+                        hostGatewayStore.saveLastDiscordChannel(host.uuid, connection.profileId,
                                 currentVoice.channelId, currentVoice.guildId, "",
                                 currentVoice.channelName);
                         voiceRow.setVisibility(View.VISIBLE);
@@ -2518,7 +2735,7 @@ public final class LauncherActivity extends Activity {
                                 "\nParticipants: " + current.participants);
                         mute.setText("MICROPHONE  ·  " + (current.muted ? "MUTED" : "ON"));
                         deafen.setText("HEADPHONES  ·  " + (current.deafened ? "DEAFENED" : "ON"));
-                        hostGatewayStore.saveLastDiscordChannel(host.uuid,
+                        hostGatewayStore.saveLastDiscordChannel(host.uuid, connection.profileId,
                                 current.channelId, current.guildId, "", current.channelName);
                         updateDiscordShortcutVoice(current);
                     }
@@ -2963,7 +3180,8 @@ public final class LauncherActivity extends Activity {
         TextView back = panelAction("BACK TO DISCORD");
         back.setOnClickListener(v -> showDiscordPanel(host, connection));
         showSidePanel("VIRTUALHERE", "USB devices",
-                "Connect host USB devices without leaving Wake & Play.",
+                "Integration profile: " + connection.profileId +
+                        "\nConnect host USB devices without leaving Wake & Play.",
                 () -> showDiscordPanel(host, connection), loading, back);
         activateDiscordControllerShortcuts(host, connection, null, null, null);
         executor.submit(() -> {
@@ -3085,11 +3303,14 @@ public final class LauncherActivity extends Activity {
     private void showDiscordSettingsPanel(Host host,
                                           HostGatewayClient.Connection connection) {
         int request = integrationPanelRequest.incrementAndGet();
-        TextView status = panelStatus("Discord profile: checking…");
-        boolean autoConnectEnabled = hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid);
+        TextView status = panelStatus("Discord profile " + connection.profileId + ": checking…");
+        String profileId = connection.profileId;
+        boolean autoConnectEnabled = hostGatewayStore.isDiscordAutoConnectEnabled(
+                host.uuid, profileId);
         HostGatewayStore.DiscordChannelSelection lastChannel =
-                hostGatewayStore.loadLastDiscordChannel(host.uuid);
-        boolean autoJoinEnabled = hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid);
+                hostGatewayStore.loadLastDiscordChannel(host.uuid, profileId);
+        boolean autoJoinEnabled = hostGatewayStore.isDiscordAutoJoinLastEnabled(
+                host.uuid, profileId);
         TextView autoConnect = panelAction("START DISCORD WITH STREAM  ·  " +
                 (autoConnectEnabled ? "ON" : "OFF"));
         TextView lastChannelStatus = panelStatus("Last voice channel: " +
@@ -3103,15 +3324,15 @@ public final class LauncherActivity extends Activity {
         Runnable parent = () -> showDiscordPanel(host, connection);
 
         autoConnect.setOnClickListener(v -> {
-            boolean enabled = !hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid);
-            hostGatewayStore.setDiscordAutoConnectEnabled(host.uuid, enabled);
+            boolean enabled = !hostGatewayStore.isDiscordAutoConnectEnabled(host.uuid, profileId);
+            hostGatewayStore.setDiscordAutoConnectEnabled(host.uuid, profileId, enabled);
             autoConnect.setText("START DISCORD WITH STREAM  ·  " + (enabled ? "ON" : "OFF"));
             lastChannelStatus.setVisibility(enabled ? View.VISIBLE : View.GONE);
             autoJoin.setVisibility(enabled ? View.VISIBLE : View.GONE);
             rebuildSidePanelFocusNavigation();
             if (enabled) {
                 discordAutoConnectAttempted.remove(
-                        host.uuid + ":" + HostGatewayStore.DEFAULT_DISCORD_PROFILE_ID);
+                        host.uuid + ":" + profileId);
             }
         });
         autoJoin.setOnClickListener(v -> {
@@ -3121,8 +3342,8 @@ public final class LauncherActivity extends Activity {
                         Toast.LENGTH_LONG).show();
                 return;
             }
-            boolean enabled = !hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid);
-            hostGatewayStore.setDiscordAutoJoinLastEnabled(host.uuid, enabled);
+            boolean enabled = !hostGatewayStore.isDiscordAutoJoinLastEnabled(host.uuid, profileId);
+            hostGatewayStore.setDiscordAutoJoinLastEnabled(host.uuid, profileId, enabled);
             autoJoin.setText("AUTO-JOIN LAST CHANNEL  ·  " + (enabled ? "ON" : "OFF"));
         });
         start.setOnClickListener(v -> runDiscordOperation(host, connection,
@@ -3201,39 +3422,96 @@ public final class LauncherActivity extends Activity {
 
     private void showDiscordServersPanel(Host host, HostGatewayClient.Connection connection,
                                          boolean force) {
-        int request = showDiscordLoadingPanel(host, "DISCORD SERVERS",
-                "Loading servers…", () -> showDiscordPanel(host, connection));
+        Runnable exitAction = communityExitAction != null
+                ? communityExitAction : () -> hideSidePanel(true);
+        int request = showDiscordLoadingPanel(host, "Servers",
+                "Loading your Discord servers…", exitAction);
         executor.submit(() -> {
             try {
                 HostGatewayClient.DiscordHome home = hostGatewayClient.getDiscordHome(connection, force);
+                HostGatewayClient.DiscordVoice loadedVoice = null;
+                try {
+                    loadedVoice = hostGatewayClient.getDiscordVoice(connection, force);
+                } catch (IOException error) {
+                    Log.w(TAG, "Unable to load Discord voice on server browser", error);
+                }
+                HostGatewayClient.DiscordVoice voice = loadedVoice;
                 mainHandler.post(() -> {
                     if (!isCurrentIntegrationPanel(request, host.uuid)) return;
                     List<View> actions = new ArrayList<>();
+                    if (voice != null && voice.connected) {
+                        actions.add(discordSection("CURRENT VOICE"));
+                        actions.add(panelStatus("●  " + voice.channelName + "  ·  " +
+                                voice.participants + " participant" +
+                                (voice.participants == 1 ? "" : "s")));
+                        TextView mute = discordAction(
+                                voice.muted ? "MIC MUTED  ·  UNMUTE" : "MIC ON  ·  MUTE",
+                                voice.muted ? DISCORD_RED : DISCORD_GREEN);
+                        TextView leave = discordAction("LEAVE", DISCORD_RED);
+                        mute.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Toggling microphone…",
+                                    "Microphone updated.",
+                                    () -> showDiscordServersPanel(host, connection, true),
+                                    () -> hostGatewayClient.setDiscordVoiceFlag(
+                                            connection, "mute", "toggle"));
+                        });
+                        leave.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Leaving voice…",
+                                    "Voice disconnected.",
+                                    () -> showDiscordServersPanel(host, connection, true),
+                                    () -> hostGatewayClient.leaveDiscordChannel(connection));
+                        });
+                        actions.add(panelActionRow(mute, leave));
+                        updateDiscordShortcutVoice(voice);
+                    } else {
+                        actions.add(panelStatus("Voice disconnected  ·  Select a server and channel to join."));
+                        updateDiscordShortcutVoice(null);
+                    }
+
+                    actions.add(discordSection("TOOLS"));
+                    TextView settings = discordAction("SETTINGS", DISCORD_TOOL);
+                    TextView usb = discordAction("USB", DISCORD_TOOL);
+                    TextView refresh = discordAction("REFRESH", DISCORD_SURFACE);
+                    settings.setOnClickListener(v -> {
+                        pulseDiscordAction(v);
+                        showDiscordSettingsPanel(host, connection);
+                    });
+                    usb.setOnClickListener(v -> {
+                        pulseDiscordAction(v);
+                        showVirtualHerePanel(host, connection, false);
+                    });
+                    refresh.setOnClickListener(v -> {
+                        pulseDiscordAction(v);
+                        showDiscordServersPanel(host, connection, true);
+                    });
+                    actions.add(panelActionRow(settings, usb));
+                    actions.add(refresh);
+
+                    actions.add(discordSection("YOUR SERVERS"));
                     if (home.guilds.isEmpty()) {
                         actions.add(panelStatus("No Discord servers are available for this account."));
                     } else {
                         for (HostGatewayClient.DiscordGuild guild : home.guilds) {
-                            TextView action = panelAction(guild.name + "  ›");
-                            action.setOnClickListener(v -> showDiscordChannelsPanel(
-                                    host, connection, guild, false));
+                            TextView action = discordAction(guild.name + "  ›", DISCORD_BLURPLE);
+                            action.setOnClickListener(v -> {
+                                pulseDiscordAction(v);
+                                showDiscordChannelsPanel(host, connection, guild, false);
+                            });
                             actions.add(action);
                         }
                     }
-                    TextView refresh = panelAction("REFRESH SERVERS");
-                    TextView back = panelAction("BACK TO DISCORD");
-                    refresh.setOnClickListener(v -> showDiscordServersPanel(host, connection, true));
-                    back.setOnClickListener(v -> showDiscordPanel(host, connection));
-                    actions.add(refresh);
-                    actions.add(back);
                     showSidePanel("DISCORD", "Servers",
-                            "Select a server to show its voice and stage channels.",
-                            () -> showDiscordPanel(host, connection),
+                            host.name + "  ·  Profile " + connection.profileId,
+                            exitAction,
                             actions.toArray(new View[0]));
+                    activateDiscordControllerShortcuts(host, connection, null, null, null);
                 });
             } catch (IOException error) {
-                showDiscordLoadError(request, host, "DISCORD SERVERS", error,
+                showDiscordLoadError(request, host, "Servers", error,
                         () -> showDiscordServersPanel(host, connection, true),
-                        () -> showDiscordPanel(host, connection));
+                        exitAction);
             }
         });
     }
@@ -3246,10 +3524,17 @@ public final class LauncherActivity extends Activity {
             try {
                 List<HostGatewayClient.DiscordChannel> channels =
                         hostGatewayClient.getDiscordChannels(connection, guild, force);
+                HostGatewayClient.DiscordVoice loadedVoice = null;
+                try {
+                    loadedVoice = hostGatewayClient.getDiscordVoice(connection, force);
+                } catch (IOException error) {
+                    Log.w(TAG, "Unable to load Discord voice on channel browser", error);
+                }
+                HostGatewayClient.DiscordVoice voice = loadedVoice;
                 mainHandler.post(() -> {
                     if (!isCurrentIntegrationPanel(request, host.uuid)) return;
-                    renderDiscordChannels(host, connection, guild.name,
-                            "Voice and stage channels.", channels,
+                    renderDiscordChannels(host, connection, guild,
+                            channels, voice,
                             () -> showDiscordChannelsPanel(host, connection, guild, true),
                             () -> showDiscordServersPanel(host, connection, false));
                 });
@@ -3262,36 +3547,263 @@ public final class LauncherActivity extends Activity {
     }
 
     private void renderDiscordChannels(Host host, HostGatewayClient.Connection connection,
-                                       String title, String details,
+                                       HostGatewayClient.DiscordGuild guild,
                                        List<HostGatewayClient.DiscordChannel> channels,
+                                       HostGatewayClient.DiscordVoice voice,
                                        Runnable refreshAction, Runnable backAction) {
         List<View> actions = new ArrayList<>();
+        if (voice != null && voice.connected) {
+            actions.add(discordSection("CURRENT VOICE"));
+            actions.add(panelStatus("●  " + voice.channelName + "  ·  " +
+                    voice.participants + " participant" +
+                    (voice.participants == 1 ? "" : "s")));
+            TextView people = discordAction("PEOPLE  ·  " + voice.participants,
+                    DISCORD_BLURPLE);
+            TextView leave = discordAction("LEAVE", DISCORD_RED);
+            people.setOnClickListener(v -> {
+                pulseDiscordAction(v);
+                showDiscordParticipantsPanel(host, connection, true);
+            });
+            leave.setOnClickListener(v -> {
+                pulseDiscordAction(v);
+                runDiscordOperation(host, connection, "Leaving voice…",
+                        "Voice disconnected.", refreshAction,
+                        () -> hostGatewayClient.leaveDiscordChannel(connection));
+            });
+            actions.add(panelActionRow(people, leave));
+            updateDiscordShortcutVoice(voice);
+        }
+        actions.add(discordSection("TOOLS"));
+        TextView settings = discordAction("SETTINGS", DISCORD_TOOL);
+        TextView usb = discordAction("USB", DISCORD_TOOL);
+        TextView refresh = discordAction("REFRESH", DISCORD_SURFACE);
+        settings.setOnClickListener(v -> {
+            pulseDiscordAction(v);
+            showDiscordSettingsPanel(host, connection);
+        });
+        usb.setOnClickListener(v -> {
+            pulseDiscordAction(v);
+            showVirtualHerePanel(host, connection, false);
+        });
+        refresh.setOnClickListener(v -> {
+            pulseDiscordAction(v);
+            refreshAction.run();
+        });
+        actions.add(panelActionRow(settings, usb));
+        actions.add(refresh);
+
+        actions.add(discordSection("VOICE CHANNELS"));
         if (channels.isEmpty()) {
             actions.add(panelStatus("No voice channels are available."));
         } else {
             for (HostGatewayClient.DiscordChannel channel : channels) {
-                String count = channel.people >= 0 ? "  ·  " + channel.people + " online" : "";
-                TextView action = panelAction((channel.favorite ? "★  " : "") + channel.name + count);
-                action.setOnClickListener(v -> runDiscordOperation(host, connection,
-                        "Connecting to " + channel.name + "…",
-                        "Connected to " + channel.name + ".",
-                        () -> renderDiscordChannels(host, connection, title, details, channels,
-                                refreshAction, backAction),
-                        () -> joinDiscordChannelAndRemember(host, connection, channel)));
+                boolean active = voice != null && voice.connected &&
+                        channel.id.equals(voice.channelId);
+                String count = channel.people >= 0 ? "  ·  " + channel.people + " people" : "";
+                String prefix = active ? "●  " : channel.favorite ? "★  " : "#  ";
+                TextView action = discordAction(prefix + channel.name + count,
+                        active ? DISCORD_GREEN : DISCORD_SURFACE);
+                action.setOnClickListener(v -> {
+                    pulseDiscordAction(v);
+                    showDiscordChannelPanel(host, connection, guild, channel, false);
+                });
                 actions.add(action);
             }
         }
-        TextView refresh = panelAction("REFRESH CHANNELS");
-        TextView back = panelAction("BACK");
-        refresh.setOnClickListener(v -> refreshAction.run());
-        back.setOnClickListener(v -> backAction.run());
+        showSidePanel("DISCORD", guild.name, "Select a channel to see its people.",
+                backAction, actions.toArray(new View[0]));
+    }
+
+    private void renderDiscordChannels(Host host, HostGatewayClient.Connection connection,
+                                       String title, String details,
+                                       List<HostGatewayClient.DiscordChannel> channels,
+                                       Runnable refreshAction, Runnable backAction) {
+        List<View> actions = new ArrayList<>();
+        actions.add(discordSection("VOICE CHANNELS"));
+        for (HostGatewayClient.DiscordChannel channel : channels) {
+            TextView action = discordAction((channel.favorite ? "★  " : "#  ") +
+                    channel.name, DISCORD_SURFACE);
+            action.setOnClickListener(v -> {
+                pulseDiscordAction(v);
+                showDiscordChannelPanel(host, connection,
+                        new HostGatewayClient.DiscordGuild(channel.guildId, channel.guildName),
+                        channel, false);
+            });
+            actions.add(action);
+        }
+        TextView refresh = discordAction("REFRESH", DISCORD_SURFACE);
+        refresh.setOnClickListener(v -> {
+            pulseDiscordAction(v);
+            refreshAction.run();
+        });
         actions.add(refresh);
-        actions.add(back);
         showSidePanel("DISCORD", title, details, backAction, actions.toArray(new View[0]));
+    }
+
+    private void showDiscordChannelPanel(Host host,
+                                         HostGatewayClient.Connection connection,
+                                         HostGatewayClient.DiscordGuild guild,
+                                         HostGatewayClient.DiscordChannel channel,
+                                         boolean force) {
+        Runnable backAction = () -> showDiscordChannelsPanel(host, connection, guild, false);
+        int request = showDiscordLoadingPanel(host, "# " + channel.name,
+                "Loading channel…", backAction);
+        executor.submit(() -> {
+            try {
+                HostGatewayClient.DiscordVoice voice =
+                        hostGatewayClient.getDiscordVoice(connection, force);
+                mainHandler.post(() -> {
+                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
+                    boolean active = voice.connected && channel.id.equals(voice.channelId);
+                    List<View> views = new ArrayList<>();
+                    views.add(discordSection("VOICE CHANNEL"));
+                    if (active) {
+                        views.add(panelStatus("●  Connected  ·  " + voice.participants +
+                                " participant" + (voice.participants == 1 ? "" : "s")));
+                        TextView mute = discordAction(
+                                voice.muted ? "MIC MUTED  ·  UNMUTE" : "MIC ON  ·  MUTE",
+                                voice.muted ? DISCORD_RED : DISCORD_GREEN);
+                        TextView leave = discordAction("LEAVE", DISCORD_RED);
+                        mute.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Toggling microphone…",
+                                    "Microphone updated.",
+                                    () -> showDiscordChannelPanel(
+                                            host, connection, guild, channel, true),
+                                    () -> hostGatewayClient.setDiscordVoiceFlag(
+                                            connection, "mute", "toggle"));
+                        });
+                        leave.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Leaving #" + channel.name + "…",
+                                    "Voice disconnected.",
+                                    () -> showDiscordChannelPanel(
+                                            host, connection, guild, channel, true),
+                                    () -> hostGatewayClient.leaveDiscordChannel(connection));
+                        });
+                        views.add(panelActionRow(mute, leave));
+                        views.add(discordSection("PEOPLE"));
+                        if (voice.participantList.isEmpty()) {
+                            views.add(panelStatus("Nobody else is visible in this channel."));
+                        }
+                        for (HostGatewayClient.DiscordParticipant participant :
+                                voice.participantList) {
+                            TextView person = panelStatus("");
+                            int[] volume = new int[]{participant.volume};
+                            boolean[] muted = new boolean[]{participant.muted};
+                            renderDiscordParticipantStatus(person, participant,
+                                    volume[0], muted[0]);
+                            views.add(person);
+                            if (participant.self) continue;
+                            SeekBar slider = panelVolumeSlider(volume[0]);
+                            TextView participantMute = discordAction(
+                                    muted[0] ? "UNMUTE" : "MUTE",
+                                    muted[0] ? DISCORD_GREEN : DISCORD_RED);
+                            AtomicBoolean muteBusy = new AtomicBoolean(false);
+                            AtomicBoolean volumeBusy = new AtomicBoolean(false);
+                            AtomicInteger desiredVolume = new AtomicInteger(volume[0]);
+                            Runnable commitVolume = () -> queueDiscordParticipantVolume(
+                                    request, host, connection, participant, volume,
+                                    muted, person, desiredVolume, volumeBusy);
+                            slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                                @Override
+                                public void onProgressChanged(SeekBar seekBar, int progress,
+                                                              boolean fromUser) {
+                                    if (!fromUser) return;
+                                    int snapped = Math.max(0, Math.min(200,
+                                            Math.round(progress / 10f) * 10));
+                                    if (snapped != progress) seekBar.setProgress(snapped);
+                                    volume[0] = snapped;
+                                    desiredVolume.set(snapped);
+                                    renderDiscordParticipantStatus(person, participant,
+                                            volume[0], muted[0]);
+                                }
+
+                                @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+
+                                @Override
+                                public void onStopTrackingTouch(SeekBar seekBar) {
+                                    commitVolume.run();
+                                }
+                            });
+                            slider.setOnKeyListener((v, keyCode, event) -> {
+                                if (event.getAction() == KeyEvent.ACTION_UP &&
+                                        (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                                                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                                    commitVolume.run();
+                                }
+                                return false;
+                            });
+                            participantMute.setOnClickListener(v -> {
+                                pulseDiscordAction(v);
+                                runDiscordParticipantAction(request, host, connection,
+                                        participant, volume, muted, person,
+                                        participantMute, muteBusy, 0);
+                            });
+                            views.add(panelWeightedActionRow(slider, participantMute));
+                        }
+                        updateDiscordShortcutVoice(voice);
+                        activateDiscordControllerShortcuts(host, connection, null, mute, leave);
+                    } else {
+                        if (voice.connected) {
+                            views.add(panelStatus("You are currently connected to ● " +
+                                    voice.channelName + ". Joining here will switch channels."));
+                            TextView leaveCurrent = discordAction("LEAVE " + voice.channelName,
+                                    DISCORD_RED);
+                            leaveCurrent.setOnClickListener(v -> {
+                                pulseDiscordAction(v);
+                                runDiscordOperation(host, connection, "Leaving voice…",
+                                        "Voice disconnected.",
+                                        () -> showDiscordChannelPanel(
+                                                host, connection, guild, channel, true),
+                                        () -> hostGatewayClient.leaveDiscordChannel(connection));
+                            });
+                            views.add(leaveCurrent);
+                        } else {
+                            views.add(panelStatus((channel.people >= 0
+                                    ? channel.people + " people visible  ·  " : "") +
+                                    "Join to see and control participants."));
+                        }
+                        TextView join = discordAction("JOIN #" + channel.name, DISCORD_GREEN);
+                        join.setOnClickListener(v -> {
+                            pulseDiscordAction(v);
+                            runDiscordOperation(host, connection, "Joining #" + channel.name + "…",
+                                    "Connected to #" + channel.name + ".",
+                                    () -> showDiscordChannelPanel(
+                                            host, connection, guild, channel, true),
+                                    () -> joinDiscordChannelAndRemember(host, connection, channel));
+                        });
+                        views.add(join);
+                        updateDiscordShortcutVoice(voice.connected ? voice : null);
+                    }
+                    views.add(discordSection("TOOLS"));
+                    TextView settings = discordAction("SETTINGS", DISCORD_TOOL);
+                    TextView usb = discordAction("USB", DISCORD_TOOL);
+                    settings.setOnClickListener(v -> {
+                        pulseDiscordAction(v);
+                        showDiscordSettingsPanel(host, connection);
+                    });
+                    usb.setOnClickListener(v -> {
+                        pulseDiscordAction(v);
+                        showVirtualHerePanel(host, connection, false);
+                    });
+                    views.add(panelActionRow(settings, usb));
+                    showSidePanel("DISCORD", "# " + channel.name, guild.name,
+                            backAction, views.toArray(new View[0]));
+                });
+            } catch (IOException error) {
+                showDiscordLoadError(request, host, "# " + channel.name, error,
+                        () -> showDiscordChannelPanel(host, connection, guild, channel, true),
+                        backAction);
+            }
+        });
     }
 
     private int showDiscordLoadingPanel(Host host, String title, String message, Runnable backAction) {
         int request = integrationPanelRequest.incrementAndGet();
+        // Keep the current Discord page in place while a child page or refresh is loaded.
+        // Replacing it with a transient loading page caused a visible double layout/focus jump.
+        if (modalLayer != null && modalLayer.getVisibility() == View.VISIBLE) return request;
         TextView status = panelStatus(message);
         TextView back = panelAction("BACK");
         back.setOnClickListener(v -> backAction.run());
@@ -3315,29 +3827,18 @@ public final class LauncherActivity extends Activity {
     private void runDiscordOperation(Host host, HostGatewayClient.Connection connection,
                                      String progress, String success, Runnable returnAction,
                                      DiscordOperation operation) {
-        int request = integrationPanelRequest.incrementAndGet();
-        TextView status = panelStatus(progress);
-        TextView back = panelAction("BACK TO DISCORD");
-        TextView close = panelAction("CLOSE");
-        back.setVisibility(View.GONE);
-        back.setOnClickListener(v -> returnAction.run());
-        close.setOnClickListener(v -> hideSidePanel(true));
-        showSidePanel("DISCORD", "Host operation", null, returnAction, status, back, close);
+        Toast.makeText(this, progress, Toast.LENGTH_SHORT).show();
         executor.submit(() -> {
             try {
                 operation.run();
                 mainHandler.post(() -> {
-                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
-                    status.setText(success);
-                    back.setVisibility(View.VISIBLE);
-                    rebuildSidePanelFocusNavigation();
+                    Toast.makeText(this, success, Toast.LENGTH_SHORT).show();
+                    returnAction.run();
                 });
             } catch (IOException error) {
                 mainHandler.post(() -> {
-                    if (!isCurrentIntegrationPanel(request, host.uuid)) return;
-                    status.setText("Discord operation failed\n" + friendlyGatewayError(error));
-                    back.setVisibility(View.VISIBLE);
-                    rebuildSidePanelFocusNavigation();
+                    Toast.makeText(this, "Discord: " + friendlyGatewayError(error),
+                            Toast.LENGTH_LONG).show();
                 });
             }
         });
@@ -3348,8 +3849,8 @@ public final class LauncherActivity extends Activity {
                                                HostGatewayClient.DiscordChannel channel)
             throws IOException {
         hostGatewayClient.joinDiscordChannel(connection, channel);
-        hostGatewayStore.saveLastDiscordChannel(host.uuid, channel.id, channel.guildId,
-                channel.guildName, channel.name);
+        hostGatewayStore.saveLastDiscordChannel(host.uuid, connection.profileId,
+                channel.id, channel.guildId, channel.guildName, channel.name);
     }
 
     private interface DiscordOperation {
@@ -3761,6 +4262,7 @@ public final class LauncherActivity extends Activity {
             List<View> actions = new ArrayList<>();
             collectFocusableViews(sidePanel, actions);
             for (View action : actions) {
+                if ("discord_action".equals(action.getTag())) continue;
                 styleCompactButton(action, action.hasFocus());
             }
         }

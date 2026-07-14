@@ -175,6 +175,54 @@ class GatewayState:
             },
         }
 
+    def profiles_summary(self) -> dict[str, Any]:
+        original_profile = self.profile_id
+        profiles = []
+        suggested_profile_id = ""
+        available_profile_id = ""
+        try:
+            for profile_id in sorted(self.config.get("profiles", {})):
+                if not PROFILE_ID_PATTERN.fullmatch(str(profile_id)):
+                    continue
+                self.select_profile(str(profile_id))
+                profile_config = self.config["profiles"].get(profile_id, {})
+                display_name = str(
+                    profile_config.get("name") or
+                    profile_config.get("display_name") or
+                    profile_id
+                ).strip()[:80] or str(profile_id)
+                display_name = re.sub(r"[\x00-\x1f\x7f]", " ", display_name).strip()
+                discord = self.discord_status()
+                vibepollo_online, _ = self.proxy("vibepollo", "/health", timeout=1.0)
+                virtualhere_online = False
+                if discord["bridge_online"]:
+                    virtualhere_ok, virtualhere = self.proxy(
+                        "discord", "/virtualhere-state", timeout=1.5)
+                    virtualhere_online = virtualhere_ok and bool(
+                        virtualhere.get("installed", False))
+                if not suggested_profile_id and discord["rpc_connected"]:
+                    suggested_profile_id = str(profile_id)
+                if not available_profile_id and (
+                        discord["bridge_online"] or vibepollo_online):
+                    available_profile_id = str(profile_id)
+                profiles.append({
+                    "id": str(profile_id),
+                    "name": display_name,
+                    "discord_bridge_online": discord["bridge_online"],
+                    "discord_rpc_connected": discord["rpc_connected"],
+                    "discord_authenticated": discord["authenticated"],
+                    "vibepollo_bridge_online": vibepollo_online,
+                    "virtualhere_available": virtualhere_online,
+                })
+        finally:
+            self.select_profile(
+                original_profile if original_profile in self.config.get("profiles", {})
+                else "default")
+        return {
+            "profiles": profiles,
+            "suggested_profile_id": suggested_profile_id or available_profile_id,
+        }
+
     @staticmethod
     def _discord_id(value: Any, name: str) -> str:
         result = str(value or "").strip()
@@ -491,6 +539,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"name": "Wake & Play Host Gateway", "api_version": 1, "pairing": self.state.pairing_code_hash is not None and time.monotonic() <= self.state.pairing_expires_at})
             return
         if not self.require_auth():
+            return
+        if path == f"{API_PREFIX}/profiles":
+            self.send_json(HTTPStatus.OK, self.state.profiles_summary())
             return
         self.select_profile()
         if path == f"{API_PREFIX}/capabilities":
