@@ -59,12 +59,17 @@ class GatewayStateTest(unittest.TestCase):
         state.config["profiles"]["basia"] = {
             "discord_bridge": "http://127.0.0.1:8865",
             "vibepollo_bridge": "http://localhost:8875",
+            "playnite_bridge": "http://127.0.0.1:8880",
         }
 
         self.assertEqual("basia", state.select_profile("basia"))
         self.assertEqual(
             "http://127.0.0.1:8865/health",
             state.bridge_url("discord", "/health"),
+        )
+        self.assertEqual(
+            "http://127.0.0.1:8880/library/list",
+            state.bridge_url("playnite", "/library/list"),
         )
         self.assertEqual("basia", state.capabilities()["gateway"]["integration_profile_id"])
 
@@ -258,6 +263,59 @@ class GatewayStateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             state.audio_action("select", {
                 "scope": "system", "kind": "output", "device_id": "../../shutdown"})
+
+    def test_playnite_library_is_paged_and_allowlisted(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy = lambda name, path, timeout=2.5: (
+            requests.append((name, path)) is None,
+            {"games": [{"id": "840317c9-b9a4-4f72-be8e-807414e36a9b"}],
+             "next_cursor": "page:2"},
+        )
+
+        status, result = state.playnite_library("page:1", 40)
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual("playnite", requests[0][0])
+        parsed = urllib.parse.urlsplit(requests[0][1])
+        self.assertEqual("/library/list", parsed.path)
+        self.assertEqual(["page:1"], urllib.parse.parse_qs(parsed.query)["cursor"])
+        self.assertEqual(["40"], urllib.parse.parse_qs(parsed.query)["limit"])
+        with self.assertRaises(ValueError):
+            state.playnite_library("../../secrets", 40)
+        with self.assertRaises(ValueError):
+            state.playnite_library("", 500)
+
+    def test_playnite_start_accepts_only_a_guid_and_uses_profile_bridge(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy_json = lambda name, path, body, timeout=8.0: (
+            requests.append((name, path, body)) is None, {"accepted": True})
+
+        status, result = state.playnite_action("game/start", {
+            "game_id": "840317C9-B9A4-4F72-BE8E-807414E36A9B",
+        })
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual(("playnite", "/game/start", {
+            "game_id": "840317c9-b9a4-4f72-be8e-807414e36a9b",
+        }), requests[0])
+        with self.assertRaises(ValueError):
+            state.playnite_action("game/start", {"game_id": "../../cmd.exe"})
+
+    def test_playnite_stop_is_graceful_by_contract(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy_json = lambda name, path, body, timeout=8.0: (
+            requests.append((path, body)) is None, {"accepted": True})
+
+        status, result = state.playnite_action("game/stop", {})
+
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual(("/game/stop", {"force": False}), requests[0])
 
 
 if __name__ == "__main__":
