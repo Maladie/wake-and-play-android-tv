@@ -55,10 +55,10 @@ if (-not $SkipScheduledTask) {
     $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"" +
         (Join-Path $InstallDirectory "Start-WakePlayGateway.ps1") + "`" -NoPairing"
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    $trigger = New-ScheduledTaskTrigger -AtStartup
     $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Limited
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
         -Settings $settings -Principal $principal -Force | Out-Null
 }

@@ -7,6 +7,10 @@ For a complete installation use `../install/Install-WakePlayHost.ps1`. For
 development, run `Start-WakePlayGateway.ps1` and enter its six-digit code under
 Wake & Play's host integrations panel within ten minutes.
 
+The installer registers the Gateway at Windows startup under the installing
+user's limited account. Interactive Bridges still start at user logon because
+Discord RPC and user credentials are bound to that Windows session.
+
 The first start generates `gateway.json`, a private TLS key and a certificate.
 They are ignored by Git. Paired client tokens are stored only as SHA-256 hashes,
 and Wake & Play pins the certificate received during pairing. The private-LAN
