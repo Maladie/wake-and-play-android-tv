@@ -15,5 +15,11 @@ the Windows desktop.
 
 The current Sunshine connector already supports the launcher handshake,
 `launch` commands and game start/stop status. The next integration step extends
-that connector to mirror library snapshots to launcher clients, accept the
-graceful stop/show commands and publish verified window readiness.
+that connector with `Install-WakePlayConnectorPatch.ps1`. The patch is
+idempotent, validates exact structural anchors and creates a
+`.wakeplay-backup` before changing the installed module. It reuses the
+connector's existing metadata functions to mirror library snapshots only to the
+requesting Bridge. Restart Playnite after applying it.
+
+Graceful stop/show commands and verified window readiness remain separate next
+steps; the snapshot patch does not alter those behaviors.

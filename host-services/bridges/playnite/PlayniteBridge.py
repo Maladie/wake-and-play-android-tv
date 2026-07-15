@@ -276,6 +276,7 @@ class WindowsPipeClient:
         data = self._open(path)
         self.handle = data
         self._send({"role": "launcher", "pid": os.getpid(), "client": "WakePlayBridge"})
+        self._send({"type": "command", "command": "snapshot"})
         return data
 
     def _send(self, message: dict[str, Any]) -> None:

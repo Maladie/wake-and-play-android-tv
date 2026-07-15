@@ -1,5 +1,6 @@
 import unittest
 
+from PatchPlayniteConnector import PATCH_MARKER, READER_ANCHOR, patch_text
 from PlayniteBridge import BridgeState
 
 
@@ -62,6 +63,16 @@ class BridgeStateTest(unittest.TestCase):
     def test_forced_stop_is_never_generated(self):
         self.state.stop_game(GAME_ID)
         self.assertEqual(False, self.commands[-1]["force"])
+
+    def test_connector_patch_is_guarded_and_idempotent(self):
+        fixture = READER_ANCHOR + "\n\nfunction Start-ConnectorLoop {\n}"
+        patched, changed = patch_text(fixture)
+        self.assertTrue(changed)
+        self.assertIn(PATCH_MARKER, patched)
+        self.assertIn("Send-WakePlaySnapshotToLauncher", patched)
+        second, changed_again = patch_text(patched)
+        self.assertFalse(changed_again)
+        self.assertEqual(patched, second)
 
 
 if __name__ == "__main__":
