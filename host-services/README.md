@@ -8,6 +8,8 @@ This directory is the canonical source for the Windows side of Wake & Play:
   VirtualHere from the interactive Windows session.
 - `bridges/vibepollo/` talks to the local Vibepollo API and provides health and
   repair operations.
+- `bridges/playnite/` reuses the Playnite connector's launcher pipe for library,
+  lifecycle and privacy-readiness coordination in the interactive profile.
 - `install/` contains the machine-level and per-profile installers.
 - `tests/` prevents runtime secrets and state from entering the repository.
 
