@@ -27,5 +27,9 @@ requesting Bridge. It also adds Playnite's `StartedProcessId` to lifecycle
 status so the Bridge never accepts an unrelated foreground window. Restart
 Playnite after applying it.
 
-Graceful stop and restoring Playnite Fullscreen remain separate steps. They do
-not weaken the readiness gate.
+Graceful stop closes the privacy gate first and then sends `WM_CLOSE` only to
+top-level windows owned by Playnite's reported game process; it never kills the
+process. Restoring Playnite Fullscreen activates an existing Fullscreen window
+or starts the official `Playnite.FullscreenApp.exe` beside the running Desktop
+app. Both operations wait for the same verified-window gate before MoonWaker
+may reveal the stream.

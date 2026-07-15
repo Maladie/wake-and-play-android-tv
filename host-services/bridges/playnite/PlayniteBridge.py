@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -31,6 +32,8 @@ class WindowProbe:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     MONITOR_DEFAULTTONEAREST = 2
     DWMWA_CLOAKED = 14
+    WM_CLOSE = 0x0010
+    SW_RESTORE = 9
 
     def __init__(self) -> None:
         self.user32 = None
@@ -47,6 +50,13 @@ class WindowProbe:
             self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
             self.user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
             self.user32.GetWindowRect.restype = wintypes.BOOL
+            self.user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                                  wintypes.WPARAM, wintypes.LPARAM]
+            self.user32.PostMessageW.restype = wintypes.BOOL
+            self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            self.user32.ShowWindow.restype = wintypes.BOOL
+            self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            self.user32.SetForegroundWindow.restype = wintypes.BOOL
             self.user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
             self.user32.MonitorFromWindow.restype = wintypes.HANDLE
             self.user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
@@ -65,7 +75,7 @@ class WindowProbe:
             except OSError:
                 pass
 
-    def _process_image(self, process_id: int) -> str:
+    def _process_path(self, process_id: int) -> str:
         if not self.kernel32:
             return ""
         handle = self.kernel32.OpenProcess(
@@ -78,9 +88,63 @@ class WindowProbe:
             if not self.kernel32.QueryFullProcessImageNameW(
                     handle, 0, buffer, ctypes.byref(size)):
                 return ""
-            return os.path.basename(buffer.value).casefold()
+            return buffer.value
         finally:
             self.kernel32.CloseHandle(handle)
+
+    def _process_image(self, process_id: int) -> str:
+        return os.path.basename(self._process_path(process_id)).casefold()
+
+    def _matching_windows(self, process_id: int = 0,
+                          image_name: str = "") -> list[int]:
+        if not self.user32:
+            return []
+        result: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def visit(hwnd: int, _lparam: int) -> bool:
+            pid = wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if process_id and int(pid.value) != process_id:
+                return True
+            if image_name and self._process_image(int(pid.value)) != image_name.casefold():
+                return True
+            result.append(int(hwnd))
+            return True
+
+        self.user32.EnumWindows(callback_type(visit), 0)
+        return result
+
+    def request_graceful_close(self, process_id: int) -> bool:
+        if not self.user32 or process_id <= 0:
+            return False
+        windows = self._matching_windows(process_id=process_id)
+        for hwnd in windows:
+            self.user32.PostMessageW(hwnd, self.WM_CLOSE, 0, 0)
+        return bool(windows)
+
+    def show_playnite_fullscreen(self, configured_path: str = "") -> dict[str, Any]:
+        if not self.user32:
+            raise OSError("Playnite Fullscreen activation requires Windows.")
+        windows = self._matching_windows(image_name="playnite.fullscreenapp.exe")
+        if windows:
+            hwnd = windows[0]
+            self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+            self.user32.SetForegroundWindow(hwnd)
+            return {"started": False, "process_id": 0}
+        executable = Path(configured_path).expanduser() if configured_path else None
+        if not executable:
+            desktop_windows = self._matching_windows(image_name="playnite.desktopapp.exe")
+            if desktop_windows:
+                pid = wintypes.DWORD()
+                self.user32.GetWindowThreadProcessId(desktop_windows[0], ctypes.byref(pid))
+                desktop_path = self._process_path(int(pid.value))
+                if desktop_path:
+                    executable = Path(desktop_path).with_name("Playnite.FullscreenApp.exe")
+        if not executable or not executable.is_file():
+            raise FileNotFoundError("Playnite.FullscreenApp.exe was not found for this profile.")
+        process = subprocess.Popen([str(executable)], cwd=str(executable.parent))
+        return {"started": True, "process_id": process.pid}
 
     def _display_name(self, hwnd: int) -> str:
         if not self.user32:
@@ -176,6 +240,13 @@ class BridgeState:
         self.command_sender: Callable[[dict[str, Any]], None] | None = None
         self.expected_display = expected_display.strip()
         self._last_window_signature: tuple[Any, ...] | None = None
+        self.graceful_close: Callable[[int], bool] | None = None
+        self.show_fullscreen_action: Callable[[], dict[str, Any]] | None = None
+
+    def set_window_actions(self, graceful_close: Callable[[int], bool],
+                           show_fullscreen: Callable[[], dict[str, Any]]) -> None:
+        self.graceful_close = graceful_close
+        self.show_fullscreen_action = show_fullscreen
 
     @staticmethod
     def game_id(value: Any) -> str:
@@ -287,7 +358,21 @@ class BridgeState:
 
     def stop_game(self, game_id: Any = "") -> dict[str, Any]:
         normalized = self.game_id(game_id) if game_id else ""
-        return self.send_command("stop", id=normalized, force=False)
+        with self.lock:
+            current_id = str(self.current.get("id", ""))
+            process_id = int(self.current.get("processId") or self.current.get("process_id") or 0)
+            if normalized and current_id and normalized != current_id:
+                raise ValueError("Requested game is not the current Playnite game.")
+            if not process_id:
+                raise ValueError("Current game process is not available for graceful stop.")
+            self.readiness.update({
+                "ready": False, "reason": "game_stopping", "stable_samples": 0})
+            self._last_window_signature = None
+            self._publish_locked("game-stopping", {"id": current_id, "process_id": process_id})
+            close = self.graceful_close
+        if not close or not close(process_id):
+            raise RuntimeError("No game window accepted the graceful close request.")
+        return {"accepted": True, "command": "stop", "force": False}
 
     def show_fullscreen(self) -> dict[str, Any]:
         with self.lock:
@@ -298,7 +383,11 @@ class BridgeState:
                 "stable_samples": 0,
             }
             self._last_window_signature = None
-        return self.send_command("show-fullscreen")
+            action = self.show_fullscreen_action
+        if not action:
+            raise RuntimeError("Playnite Fullscreen activation is unavailable.")
+        details = action()
+        return {"accepted": True, "command": "show-fullscreen", **details}
 
     def apply_window_sample(self, sample: dict[str, Any]) -> None:
         with self.lock:
@@ -606,8 +695,13 @@ def main() -> None:
         raise ValueError("Playnite Bridge must remain on loopback.")
     expected_display = str(config.get("streamed_display", "")).strip()
     state = BridgeState(expected_display)
+    window_probe = WindowProbe()
+    fullscreen_path = str(config.get("playnite_fullscreen_executable", "")).strip()
+    state.set_window_actions(
+        window_probe.request_graceful_close,
+        lambda: window_probe.show_playnite_fullscreen(fullscreen_path))
     threading.Thread(
-        target=WindowReadinessWorker(state, WindowProbe()).run,
+        target=WindowReadinessWorker(state, window_probe).run,
         name="PlayniteWindowReadiness", daemon=True).start()
     pipe = WindowsPipeClient(state)
     threading.Thread(target=pipe.run, name="PlaynitePipe", daemon=True).start()

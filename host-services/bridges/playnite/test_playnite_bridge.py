@@ -14,7 +14,12 @@ class BridgeStateTest(unittest.TestCase):
     def setUp(self):
         self.state = BridgeState()
         self.commands = []
+        self.closed_processes = []
+        self.fullscreen_calls = []
         self.state.set_transport(True, self.commands.append)
+        self.state.set_window_actions(
+            lambda process_id: not self.closed_processes.append(process_id),
+            lambda: self.fullscreen_calls.append(True) or {"started": False})
 
     def test_start_is_allowlisted_and_closes_privacy_gate(self):
         result = self.state.start_game(GAME_ID.upper())
@@ -66,8 +71,22 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual("", second["next_cursor"])
 
     def test_forced_stop_is_never_generated(self):
-        self.state.stop_game(GAME_ID)
-        self.assertEqual(False, self.commands[-1]["force"])
+        self.state.handle_message({
+            "type": "status",
+            "status": {"name": "gameStarted", "id": GAME_ID, "processId": 4242},
+        })
+        result = self.state.stop_game(GAME_ID)
+        self.assertEqual(False, result["force"])
+        self.assertEqual([4242], self.closed_processes)
+        self.assertFalse(self.state.readiness["ready"])
+        self.assertEqual("game_stopping", self.state.readiness["reason"])
+
+    def test_show_fullscreen_closes_gate_before_activation(self):
+        result = self.state.show_fullscreen()
+        self.assertEqual("show-fullscreen", result["command"])
+        self.assertEqual([True], self.fullscreen_calls)
+        self.assertFalse(self.state.readiness["ready"])
+        self.assertEqual("waiting_for_playnite_window", self.state.readiness["reason"])
 
     def test_connector_patch_is_guarded_and_idempotent(self):
         fixture = "\n".join([

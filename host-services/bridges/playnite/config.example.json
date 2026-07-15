@@ -1,5 +1,6 @@
 {
   "listen_host": "127.0.0.1",
   "listen_port": 8780,
-  "streamed_display": ""
+  "streamed_display": "",
+  "playnite_fullscreen_executable": ""
 }
