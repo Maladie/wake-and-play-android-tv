@@ -6,10 +6,12 @@ param(
     [string]$ProfileName = "",
     [int]$DiscordPort = 8765,
     [int]$VibepolloPort = 8775,
+    [int]$PlaynitePort = 8780,
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "WakePlayHost\profiles"),
     [string]$GatewayConfigPath = "C:\Tools\WakePlayHost\gateway\gateway.json",
     [switch]$SkipDiscord,
     [switch]$SkipVibepollo,
+    [switch]$SkipPlaynite,
     [switch]$SkipGatewayRegistration,
     [switch]$SkipStart
 )
@@ -26,16 +28,22 @@ if ($profileDisplayName.Length -gt 80 -or $profileDisplayName -match '[\x00-\x1f
 }
 
 if ($DiscordPort -lt 1024 -or $DiscordPort -gt 65535 -or
-    $VibepolloPort -lt 1024 -or $VibepolloPort -gt 65535) {
+    $VibepolloPort -lt 1024 -or $VibepolloPort -gt 65535 -or
+    $PlaynitePort -lt 1024 -or $PlaynitePort -gt 65535) {
     throw "Bridge ports must be between 1024 and 65535."
 }
-if (-not $SkipDiscord -and -not $SkipVibepollo -and $DiscordPort -eq $VibepolloPort) {
-    throw "Discord and Vibepollo Bridge must use different ports."
+$activePorts = @()
+if (-not $SkipDiscord) { $activePorts += $DiscordPort }
+if (-not $SkipVibepollo) { $activePorts += $VibepolloPort }
+if (-not $SkipPlaynite) { $activePorts += $PlaynitePort }
+if (($activePorts | Select-Object -Unique).Count -ne $activePorts.Count) {
+    throw "Discord, Vibepollo and Playnite Bridges must use different ports."
 }
-if ($ProfileId -ne "default" -and
-    -not $PSBoundParameters.ContainsKey("DiscordPort") -and
-    -not $PSBoundParameters.ContainsKey("VibepolloPort")) {
-    throw "Additional profiles require explicit, unique -DiscordPort and -VibepolloPort values."
+if ($ProfileId -ne "default" -and (
+    (-not $SkipDiscord -and -not $PSBoundParameters.ContainsKey("DiscordPort")) -or
+    (-not $SkipVibepollo -and -not $PSBoundParameters.ContainsKey("VibepolloPort")) -or
+    (-not $SkipPlaynite -and -not $PSBoundParameters.ContainsKey("PlaynitePort")))) {
+    throw "Additional profiles require explicit, unique -DiscordPort, -VibepolloPort and -PlaynitePort values."
 }
 
 $hostServicesRoot = Split-Path -Parent $PSScriptRoot
@@ -117,6 +125,22 @@ if (-not $SkipVibepollo) {
         (Join-Path $vibepolloDirectory "Start-VibepolloBridge.ps1")
 }
 
+$playniteDirectory = $null
+if (-not $SkipPlaynite) {
+    $playniteDirectory = Install-BridgeFiles "playnite" @(
+        "PlayniteBridge.py", "config.example.json",
+        "Start-PlayniteBridge.ps1", "Stop-PlayniteBridge.ps1",
+        "PatchPlayniteConnector.py", "Install-WakePlayConnectorPatch.ps1", "README.md")
+    $playniteConfig = Join-Path $playniteDirectory "config.json"
+    if (-not (Test-Path -LiteralPath $playniteConfig)) {
+        Copy-Item -LiteralPath (Join-Path $playniteDirectory "config.example.json") `
+            -Destination $playniteConfig
+    }
+    Set-ConfigPort $playniteConfig "listen_port" $PlaynitePort
+    Register-BridgeTask "Wake & Play Playnite Bridge ($ProfileId)" `
+        (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1")
+}
+
 if (-not $SkipGatewayRegistration) {
     try {
         $gateway = Get-Content -LiteralPath $GatewayConfigPath -Raw | ConvertFrom-Json
@@ -127,6 +151,7 @@ if (-not $SkipGatewayRegistration) {
             name = $profileDisplayName
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
+            playnite_bridge = if ($SkipPlaynite) { "" } else { "http://127.0.0.1:$PlaynitePort" }
         }
         if ($null -eq $gateway.profiles.PSObject.Properties[$ProfileId]) {
             $gateway.profiles | Add-Member -NotePropertyName $ProfileId -NotePropertyValue $entry
@@ -143,6 +168,7 @@ if (-not $SkipGatewayRegistration) {
             name = $profileDisplayName
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
+            playnite_bridge = if ($SkipPlaynite) { "" } else { "http://127.0.0.1:$PlaynitePort" }
         } | ConvertTo-Json | Set-Content -LiteralPath $registrationPath -Encoding UTF8
         Write-Warning "Gateway configuration could not be updated: $($_.Exception.Message)"
         Write-Warning "Registration data was written to $registrationPath for an administrator."
@@ -152,6 +178,7 @@ if (-not $SkipGatewayRegistration) {
 if (-not $SkipStart) {
     if ($discordDirectory) { & (Join-Path $discordDirectory "Start-DiscordBridge.ps1") }
     if ($vibepolloDirectory) { & (Join-Path $vibepolloDirectory "Start-VibepolloBridge.ps1") }
+    if ($playniteDirectory) { & (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1") }
 }
 
 Write-Host "Wake & Play integration profile '$ProfileId' installed for $env:USERNAME." -ForegroundColor Green

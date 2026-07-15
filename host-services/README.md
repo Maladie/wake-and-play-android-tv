@@ -37,7 +37,8 @@ Additional profiles require explicit unique ports:
 
 ```powershell
 C:\Tools\WakePlayHost\install\Install-WakePlayProfile.ps1 `
-  -ProfileId basia -ProfileName "Basia" -DiscordPort 8865 -VibepolloPort 8875
+  -ProfileId basia -ProfileName "Basia" -DiscordPort 8865 -VibepolloPort 8875 `
+  -PlaynitePort 8880
 ```
 
 The profile installer copies clean Bridge sources into the current user's
