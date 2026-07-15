@@ -8,7 +8,8 @@ import shutil
 from pathlib import Path
 
 
-PATCH_MARKER = "# WAKEPLAY-CONSOLE-SNAPSHOT-V1"
+PATCH_MARKER_V1 = "# WAKEPLAY-CONSOLE-SNAPSHOT-V1"
+PATCH_MARKER = "# WAKEPLAY-CONSOLE-BRIDGE-V2"
 
 READER_ANCHOR = """        if ($obj.type -eq 'command' -and $obj.command -eq 'launch' -and $obj.id) {
           Register-SunshineLaunchedGame -Id $obj.id
@@ -61,18 +62,49 @@ function Send-WakePlaySnapshotToLauncher {
 
 '''
 
+STATUS_PARAM_ANCHOR = "  param([string]$Name, [object]$Game)"
+STATUS_PARAM_REPLACEMENT = "  param([string]$Name, [object]$Game, [int]$ProcessId = 0)"
+STATUS_OBJECT_ANCHOR = "$status = @{ name = $Name; id = $Game.Id.ToString(); installDir = $instDir; exe = (Get-GameActionInfo -Game $Game).exe }"
+STATUS_OBJECT_REPLACEMENT = "$status = @{ name = $Name; id = $Game.Id.ToString(); installDir = $instDir; exe = (Get-GameActionInfo -Game $Game).exe; processId = $ProcessId }"
+SEND_PARAM_ANCHOR = "  param([string]$Name, [object]$Game, [switch]$ReturnLauncherCount)"
+SEND_PARAM_REPLACEMENT = "  param([string]$Name, [object]$Game, [int]$ProcessId = 0, [switch]$ReturnLauncherCount)"
+SEND_BUILD_ANCHOR = "try { $payload = Build-StatusPayload -Name $Name -Game $Game }"
+SEND_BUILD_REPLACEMENT = "try { $payload = Build-StatusPayload -Name $Name -Game $Game -ProcessId $ProcessId }"
+STARTED_ANCHOR = "  Send-StatusMessage -Name 'gameStarted' -Game $game\n}"
+STARTED_REPLACEMENT = """  $processId = 0
+  try { $processId = [int]$evnArgs.StartedProcessId } catch {}
+  Send-StatusMessage -Name 'gameStarted' -Game $game -ProcessId $processId
+}
+# WAKEPLAY-CONSOLE-BRIDGE-V2"""
+
 
 def patch_text(source: str) -> tuple[str, bool]:
     if PATCH_MARKER in source:
         return source, False
-    missing = [name for name, anchor in (
-        ("launcher reader", READER_ANCHOR),
-        ("connector loop", FUNCTION_ANCHOR),
-    ) if anchor not in source]
+    anchors = [
+        ("status parameters", STATUS_PARAM_ANCHOR),
+        ("status object", STATUS_OBJECT_ANCHOR),
+        ("sender parameters", SEND_PARAM_ANCHOR),
+        ("sender payload", SEND_BUILD_ANCHOR),
+        ("game started handler", STARTED_ANCHOR),
+    ]
+    if PATCH_MARKER_V1 not in source:
+        anchors += [("launcher reader", READER_ANCHOR), ("connector loop", FUNCTION_ANCHOR)]
+    missing = [name for name, anchor in anchors if anchor not in source]
     if missing:
         raise ValueError("Unsupported Sunshine Playnite Connector; missing " + ", ".join(missing))
-    patched = source.replace(READER_ANCHOR, READER_REPLACEMENT, 1)
-    patched = patched.replace(FUNCTION_ANCHOR, SNAPSHOT_FUNCTION + FUNCTION_ANCHOR, 1)
+    patched = source
+    if PATCH_MARKER_V1 not in patched:
+        patched = patched.replace(READER_ANCHOR, READER_REPLACEMENT, 1)
+        patched = patched.replace(FUNCTION_ANCHOR, SNAPSHOT_FUNCTION + FUNCTION_ANCHOR, 1)
+    for anchor, replacement in (
+        (STATUS_PARAM_ANCHOR, STATUS_PARAM_REPLACEMENT),
+        (STATUS_OBJECT_ANCHOR, STATUS_OBJECT_REPLACEMENT),
+        (SEND_PARAM_ANCHOR, SEND_PARAM_REPLACEMENT),
+        (SEND_BUILD_ANCHOR, SEND_BUILD_REPLACEMENT),
+        (STARTED_ANCHOR, STARTED_REPLACEMENT),
+    ):
+        patched = patched.replace(anchor, replacement, 1)
     return patched, True
 
 

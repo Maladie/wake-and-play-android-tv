@@ -11,7 +11,11 @@ process termination is intentionally unavailable.
 
 The readiness response is privacy-sensitive. `ready=false` means MoonWaker must
 keep its opaque loading surface visible. A timeout is not permission to reveal
-the Windows desktop.
+the Windows desktop. Readiness requires the Playnite-reported game process, a
+visible foreground window on the configured streamed display and three
+consecutive samples with identical geometry. Set `streamed_display` to the
+profile's Win32 display name (for example `\\.\DISPLAY15`). An empty or
+mismatched value deliberately keeps the privacy gate closed.
 
 The current Sunshine connector already supports the launcher handshake,
 `launch` commands and game start/stop status. The next integration step extends
@@ -19,7 +23,9 @@ that connector with `Install-WakePlayConnectorPatch.ps1`. The patch is
 idempotent, validates exact structural anchors and creates a
 `.wakeplay-backup` before changing the installed module. It reuses the
 connector's existing metadata functions to mirror library snapshots only to the
-requesting Bridge. Restart Playnite after applying it.
+requesting Bridge. It also adds Playnite's `StartedProcessId` to lifecycle
+status so the Bridge never accepts an unrelated foreground window. Restart
+Playnite after applying it.
 
-Graceful stop/show commands and verified window readiness remain separate next
-steps; the snapshot patch does not alter those behaviors.
+Graceful stop and restoring Playnite Fullscreen remain separate steps. They do
+not weaken the readiness gate.

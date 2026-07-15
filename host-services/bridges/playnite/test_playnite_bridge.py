@@ -1,6 +1,9 @@
 import unittest
 
-from PatchPlayniteConnector import PATCH_MARKER, READER_ANCHOR, patch_text
+from PatchPlayniteConnector import (
+    PATCH_MARKER, READER_ANCHOR, SEND_BUILD_ANCHOR, SEND_PARAM_ANCHOR,
+    STARTED_ANCHOR, STATUS_OBJECT_ANCHOR, STATUS_PARAM_ANCHOR, patch_text,
+)
 from PlayniteBridge import BridgeState
 
 
@@ -28,12 +31,14 @@ class BridgeStateTest(unittest.TestCase):
     def test_status_tracks_lifecycle_without_revealing_desktop(self):
         self.state.handle_message({
             "type": "status",
-            "status": {"name": "gameStarted", "id": GAME_ID, "title": "Baba Is You"},
+            "status": {"name": "gameStarted", "id": GAME_ID, "title": "Baba Is You",
+                       "processId": 4242},
         })
 
         self.assertEqual("running", self.state.current["state"])
         self.assertFalse(self.state.readiness["ready"])
         self.assertEqual("waiting_for_game_window", self.state.readiness["reason"])
+        self.assertEqual(4242, self.state.current["processId"])
 
         self.state.handle_message({
             "type": "status",
@@ -65,14 +70,35 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(False, self.commands[-1]["force"])
 
     def test_connector_patch_is_guarded_and_idempotent(self):
-        fixture = READER_ANCHOR + "\n\nfunction Start-ConnectorLoop {\n}"
+        fixture = "\n".join([
+            READER_ANCHOR, STATUS_PARAM_ANCHOR, STATUS_OBJECT_ANCHOR,
+            SEND_PARAM_ANCHOR, SEND_BUILD_ANCHOR, STARTED_ANCHOR,
+            "function Start-ConnectorLoop {", "}",
+        ])
         patched, changed = patch_text(fixture)
         self.assertTrue(changed)
         self.assertIn(PATCH_MARKER, patched)
         self.assertIn("Send-WakePlaySnapshotToLauncher", patched)
+        self.assertIn("StartedProcessId", patched)
         second, changed_again = patch_text(patched)
         self.assertFalse(changed_again)
         self.assertEqual(patched, second)
+
+    def test_readiness_requires_three_stable_samples_and_closes_immediately(self):
+        self.state.handle_message({
+            "type": "status",
+            "status": {"name": "gameStarted", "id": GAME_ID, "processId": 4242},
+        })
+        sample = {"qualified": True, "reason": "stabilizing_target_window",
+                  "process_id": 4242, "hwnd": 17, "display": r"\\.\DISPLAY15",
+                  "bounds": [0, 0, 1920, 1080]}
+        self.state.apply_window_sample(sample)
+        self.state.apply_window_sample(sample)
+        self.assertFalse(self.state.readiness["ready"])
+        self.state.apply_window_sample(sample)
+        self.assertTrue(self.state.readiness["ready"])
+        self.state.apply_window_sample({"qualified": False, "reason": "target_not_foreground"})
+        self.assertFalse(self.state.readiness["ready"])
 
 
 if __name__ == "__main__":

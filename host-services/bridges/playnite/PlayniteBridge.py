@@ -22,6 +22,132 @@ from typing import Any, Callable
 GAME_ID_PATTERN = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 MAX_BODY_BYTES = 16 * 1024
+REQUIRED_STABLE_SAMPLES = 3
+
+
+class WindowProbe:
+    """Collects Win32 evidence; it never treats the desktop as a valid target."""
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    MONITOR_DEFAULTTONEAREST = 2
+    DWMWA_CLOAKED = 14
+
+    def __init__(self) -> None:
+        self.user32 = None
+        self.kernel32 = None
+        self.dwmapi = None
+        if os.name == "nt":
+            self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+            self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.user32.GetForegroundWindow.restype = wintypes.HWND
+            self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            self.user32.IsWindowVisible.restype = wintypes.BOOL
+            self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                              ctypes.POINTER(wintypes.DWORD)]
+            self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            self.user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            self.user32.GetWindowRect.restype = wintypes.BOOL
+            self.user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+            self.user32.MonitorFromWindow.restype = wintypes.HANDLE
+            self.user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+            self.user32.GetMonitorInfoW.restype = wintypes.BOOL
+            self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            self.kernel32.OpenProcess.restype = wintypes.HANDLE
+            self.kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD)]
+            self.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            try:
+                self.dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+                self.dwmapi.DwmGetWindowAttribute.argtypes = [
+                    wintypes.HWND, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD]
+                self.dwmapi.DwmGetWindowAttribute.restype = wintypes.LONG
+            except OSError:
+                pass
+
+    def _process_image(self, process_id: int) -> str:
+        if not self.kernel32:
+            return ""
+        handle = self.kernel32.OpenProcess(
+            self.PROCESS_QUERY_LIMITED_INFORMATION, False, process_id)
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not self.kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buffer, ctypes.byref(size)):
+                return ""
+            return os.path.basename(buffer.value).casefold()
+        finally:
+            self.kernel32.CloseHandle(handle)
+
+    def _display_name(self, hwnd: int) -> str:
+        if not self.user32:
+            return ""
+
+        class MonitorInfoEx(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD),
+                        ("szDevice", wintypes.WCHAR * 32)]
+
+        monitor = self.user32.MonitorFromWindow(hwnd, self.MONITOR_DEFAULTTONEAREST)
+        info = MonitorInfoEx()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return str(info.szDevice)
+        return ""
+
+    def sample(self, target_kind: str, process_id: int,
+               expected_display: str) -> dict[str, Any]:
+        if not self.user32:
+            return {"qualified": False, "reason": "window_probe_unavailable"}
+        if not expected_display:
+            return {"qualified": False, "reason": "stream_display_not_configured"}
+
+        windows: list[dict[str, Any]] = []
+        foreground = int(self.user32.GetForegroundWindow() or 0)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def visit(hwnd: int, _lparam: int) -> bool:
+            if not self.user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            image = self._process_image(int(pid.value))
+            if target_kind == "game" and int(pid.value) != process_id:
+                return True
+            if target_kind == "playnite" and image != "playnite.fullscreenapp.exe":
+                return True
+            cloaked = wintypes.DWORD()
+            if self.dwmapi:
+                self.dwmapi.DwmGetWindowAttribute(
+                    hwnd, self.DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+            rect = wintypes.RECT()
+            if cloaked.value or not self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            width, height = rect.right - rect.left, rect.bottom - rect.top
+            if width < 640 or height < 360:
+                return True
+            windows.append({
+                "hwnd": int(hwnd), "process_id": int(pid.value), "image": image,
+                "display": self._display_name(hwnd),
+                "bounds": [rect.left, rect.top, rect.right, rect.bottom],
+                "foreground": int(hwnd) == foreground,
+            })
+            return True
+
+        callback = callback_type(visit)
+        self.user32.EnumWindows(callback, 0)
+        if not windows:
+            reason = "waiting_for_game_window" if target_kind == "game" else "waiting_for_playnite_window"
+            return {"qualified": False, "reason": reason}
+        candidate = next((item for item in windows if item["foreground"]), windows[0])
+        if not candidate["foreground"]:
+            return {"qualified": False, "reason": "target_not_foreground", **candidate}
+        if candidate["display"].casefold() != expected_display.casefold():
+            return {"qualified": False, "reason": "target_on_wrong_display", **candidate}
+        return {"qualified": True, "reason": "stabilizing_target_window", **candidate}
 
 
 def compact_json(value: Any) -> bytes:
@@ -29,7 +155,7 @@ def compact_json(value: Any) -> bytes:
 
 
 class BridgeState:
-    def __init__(self) -> None:
+    def __init__(self, expected_display: str = "") -> None:
         self.lock = threading.RLock()
         self.events_changed = threading.Condition(self.lock)
         self.connected = False
@@ -48,6 +174,8 @@ class BridgeState:
         self.events: deque[dict[str, Any]] = deque(maxlen=200)
         self.next_sequence = 1
         self.command_sender: Callable[[dict[str, Any]], None] | None = None
+        self.expected_display = expected_display.strip()
+        self._last_window_signature: tuple[Any, ...] | None = None
 
     @staticmethod
     def game_id(value: Any) -> str:
@@ -118,6 +246,7 @@ class BridgeState:
                         "game_id": game_id,
                         "stable_samples": 0,
                     }
+                    self._last_window_signature = None
                     self._publish_locked("game-running", dict(self.current))
                 elif name == "gameStopped":
                     previous = dict(self.current)
@@ -128,6 +257,7 @@ class BridgeState:
                         "target_kind": "playnite",
                         "stable_samples": 0,
                     }
+                    self._last_window_signature = None
                     self._publish_locked("game-stopped", previous)
                 else:
                     self._publish_locked(name or "playnite-status", status)
@@ -152,6 +282,7 @@ class BridgeState:
                 "stable_samples": 0,
             }
             self._publish_locked("game-starting", {"id": normalized})
+            self._last_window_signature = None
         return self.send_command("launch", id=normalized)
 
     def stop_game(self, game_id: Any = "") -> dict[str, Any]:
@@ -166,7 +297,43 @@ class BridgeState:
                 "target_kind": "playnite",
                 "stable_samples": 0,
             }
+            self._last_window_signature = None
         return self.send_command("show-fullscreen")
+
+    def apply_window_sample(self, sample: dict[str, Any]) -> None:
+        with self.lock:
+            previous_ready = bool(self.readiness.get("ready"))
+            if not sample.get("qualified"):
+                self._last_window_signature = None
+                self.readiness.update({
+                    "ready": False,
+                    "reason": str(sample.get("reason", "window_not_ready")),
+                    "stable_samples": 0,
+                })
+                for key in ("process_id", "display", "bounds"):
+                    if key in sample:
+                        self.readiness[key] = sample[key]
+                if previous_ready:
+                    self._publish_locked("privacy-gate-closed", dict(self.readiness))
+                return
+            signature = (
+                sample.get("process_id"), sample.get("hwnd"), sample.get("display"),
+                tuple(sample.get("bounds") or []),
+            )
+            stable = int(self.readiness.get("stable_samples", 0)) + 1 \
+                if signature == self._last_window_signature else 1
+            self._last_window_signature = signature
+            ready = stable >= REQUIRED_STABLE_SAMPLES
+            self.readiness.update({
+                "ready": ready,
+                "reason": "target_window_ready" if ready else "stabilizing_target_window",
+                "stable_samples": stable,
+                "process_id": sample.get("process_id"),
+                "display": sample.get("display"),
+                "bounds": sample.get("bounds"),
+            })
+            if ready and not previous_ready:
+                self._publish_locked("target-window-ready", dict(self.readiness))
 
     def library_page(self, cursor: str, limit: int) -> dict[str, Any]:
         offset = int(cursor or "0")
@@ -194,6 +361,27 @@ class BridgeState:
                 self.events_changed.wait(remaining)
             return [item for item in self.events if item["sequence"] > sequence]
 
+
+class WindowReadinessWorker:
+    def __init__(self, state: BridgeState, probe: WindowProbe) -> None:
+        self.state = state
+        self.probe = probe
+
+    def run(self) -> None:
+        while True:
+            with self.state.lock:
+                readiness = dict(self.state.readiness)
+                current = dict(self.state.current)
+                expected_display = self.state.expected_display
+            target_kind = str(readiness.get("target_kind", "playnite"))
+            process_id = int(current.get("processId") or current.get("process_id") or 0)
+            if target_kind == "game" and not process_id:
+                self.state.apply_window_sample({
+                    "qualified": False, "reason": "waiting_for_game_process_id"})
+            else:
+                self.state.apply_window_sample(
+                    self.probe.sample(target_kind, process_id, expected_display))
+            time.sleep(0.25)
 
 class WindowsPipeClient:
     CONTROL_PIPE = r"\\.\pipe\Sunshine.PlayniteExtension"
@@ -416,7 +604,11 @@ def main() -> None:
     listen_host = str(config.get("listen_host", "127.0.0.1"))
     if listen_host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Playnite Bridge must remain on loopback.")
-    state = BridgeState()
+    expected_display = str(config.get("streamed_display", "")).strip()
+    state = BridgeState(expected_display)
+    threading.Thread(
+        target=WindowReadinessWorker(state, WindowProbe()).run,
+        name="PlayniteWindowReadiness", daemon=True).start()
     pipe = WindowsPipeClient(state)
     threading.Thread(target=pipe.run, name="PlaynitePipe", daemon=True).start()
     server = PlayniteServer((listen_host, int(config.get("listen_port", 8780))), state)
