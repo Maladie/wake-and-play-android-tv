@@ -4,7 +4,7 @@ from PatchPlayniteConnector import (
     PATCH_MARKER, READER_ANCHOR, SEND_BUILD_ANCHOR, SEND_PARAM_ANCHOR,
     STARTED_ANCHOR, STATUS_OBJECT_ANCHOR, STATUS_PARAM_ANCHOR, patch_text,
 )
-from PlayniteBridge import BridgeState
+from PlayniteBridge import BridgeState, StreamDisplayResolver
 
 
 GAME_ID = "840317c9-b9a4-4f72-be8e-807414e36a9b"
@@ -87,6 +87,16 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual([True], self.fullscreen_calls)
         self.assertFalse(self.state.readiness["ready"])
         self.assertEqual("waiting_for_playnite_window", self.state.readiness["reason"])
+
+    def test_stream_display_is_resolved_only_from_named_fields(self):
+        payload = {
+            "sources": {
+                "session": {"value": {"display_name": "DISPLAY15"}},
+                "clients": {"value": {"name": "DISPLAY99", "output_name_override": ""}},
+            }
+        }
+        self.assertEqual(
+            [r"\\.\DISPLAY15"], StreamDisplayResolver.displays_from_payload(payload))
 
     def test_connector_patch_is_guarded_and_idempotent(self):
         fixture = "\n".join([

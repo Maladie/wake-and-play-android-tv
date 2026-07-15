@@ -80,6 +80,17 @@ function Set-ConfigPort {
     $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Set-ConfigValue {
+    param([string]$Path, [string]$Property, [object]$Value)
+    $config = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ($null -eq $config.PSObject.Properties[$Property]) {
+        $config | Add-Member -NotePropertyName $Property -NotePropertyValue $Value
+    } else {
+        $config.$Property = $Value
+    }
+    $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
 function Register-BridgeTask {
     param([string]$Name, [string]$StartScript)
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -137,6 +148,8 @@ if (-not $SkipPlaynite) {
             -Destination $playniteConfig
     }
     Set-ConfigPort $playniteConfig "listen_port" $PlaynitePort
+    Set-ConfigValue $playniteConfig "vibepollo_bridge" `
+        $(if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" })
     Register-BridgeTask "Wake & Play Playnite Bridge ($ProfileId)" `
         (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1")
 }

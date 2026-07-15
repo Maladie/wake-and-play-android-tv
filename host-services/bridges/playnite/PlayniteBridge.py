@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.request
 from collections import deque
 from ctypes import wintypes
 from http import HTTPStatus
@@ -24,6 +25,62 @@ GAME_ID_PATTERN = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 MAX_BODY_BYTES = 16 * 1024
 REQUIRED_STABLE_SAMPLES = 3
+DISPLAY_NAME_PATTERN = re.compile(r"^(?:\\\\\.\\)?DISPLAY[0-9]+$", re.IGNORECASE)
+
+
+class StreamDisplayResolver:
+    DISPLAY_KEYS = {
+        "display", "display_name", "displayname", "monitor", "monitor_name",
+        "output", "output_name", "outputname", "output_name_override",
+    }
+
+    def __init__(self, vibepollo_bridge: str) -> None:
+        self.endpoint = vibepollo_bridge.rstrip("/") + "/diagnostics/stream-sources" \
+            if vibepollo_bridge else ""
+        self.last_check = 0.0
+        self.cached = ""
+
+    @staticmethod
+    def _normalize(value: Any) -> str:
+        text = str(value or "").strip()
+        if not DISPLAY_NAME_PATTERN.fullmatch(text):
+            return ""
+        if text.upper().startswith("DISPLAY"):
+            return "\\\\.\\" + text.upper()
+        return text.upper()
+
+    @classmethod
+    def displays_from_payload(cls, payload: Any) -> list[str]:
+        found: set[str] = set()
+
+        def visit(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    visit(child, str(child_key).casefold())
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child, key)
+            elif key in cls.DISPLAY_KEYS:
+                normalized = cls._normalize(value)
+                if normalized:
+                    found.add(normalized)
+
+        visit(payload)
+        return sorted(found)
+
+    def resolve(self) -> str:
+        now = time.monotonic()
+        if not self.endpoint or now - self.last_check < 1.0:
+            return self.cached
+        self.last_check = now
+        try:
+            with urllib.request.urlopen(self.endpoint, timeout=0.75) as response:
+                payload = json.loads(response.read(256 * 1024).decode("utf-8-sig"))
+            displays = self.displays_from_payload(payload)
+            self.cached = displays[0] if len(displays) == 1 else ""
+        except Exception:
+            pass
+        return self.cached
 
 
 class WindowProbe:
@@ -248,6 +305,16 @@ class BridgeState:
         self.graceful_close = graceful_close
         self.show_fullscreen_action = show_fullscreen
 
+    def set_expected_display(self, display: str) -> None:
+        normalized = StreamDisplayResolver._normalize(display)
+        with self.lock:
+            if normalized and normalized != self.expected_display:
+                self.expected_display = normalized
+                self._last_window_signature = None
+                self.readiness.update({
+                    "ready": False, "reason": "stream_display_changed", "stable_samples": 0})
+                self._publish_locked("stream-display-resolved", {"display": normalized})
+
     @staticmethod
     def game_id(value: Any) -> str:
         result = str(value or "").strip().lower()
@@ -452,12 +519,17 @@ class BridgeState:
 
 
 class WindowReadinessWorker:
-    def __init__(self, state: BridgeState, probe: WindowProbe) -> None:
+    def __init__(self, state: BridgeState, probe: WindowProbe,
+                 display_resolver: StreamDisplayResolver) -> None:
         self.state = state
         self.probe = probe
+        self.display_resolver = display_resolver
 
     def run(self) -> None:
         while True:
+            resolved_display = self.display_resolver.resolve()
+            if resolved_display:
+                self.state.set_expected_display(resolved_display)
             with self.state.lock:
                 readiness = dict(self.state.readiness)
                 current = dict(self.state.current)
@@ -697,11 +769,12 @@ def main() -> None:
     state = BridgeState(expected_display)
     window_probe = WindowProbe()
     fullscreen_path = str(config.get("playnite_fullscreen_executable", "")).strip()
+    display_resolver = StreamDisplayResolver(str(config.get("vibepollo_bridge", "")).strip())
     state.set_window_actions(
         window_probe.request_graceful_close,
         lambda: window_probe.show_playnite_fullscreen(fullscreen_path))
     threading.Thread(
-        target=WindowReadinessWorker(state, window_probe).run,
+        target=WindowReadinessWorker(state, window_probe, display_resolver).run,
         name="PlayniteWindowReadiness", daemon=True).start()
     pipe = WindowsPipeClient(state)
     threading.Thread(target=pipe.run, name="PlaynitePipe", daemon=True).start()
