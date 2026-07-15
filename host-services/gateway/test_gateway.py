@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -37,6 +38,21 @@ class GatewayStateTest(unittest.TestCase):
         state.config["profiles"]["default"]["vibepollo_bridge"] = "http://192.0.2.2:8775"
         with self.assertRaises(ValueError):
             state.bridge_url("vibepollo", "/health")
+
+    def test_sleep_host_schedules_native_action_without_waiting(self):
+        state = GatewayState(self.config_path, None)
+        scheduled = []
+        state._schedule_system_sleep = lambda: scheduled.append(True)
+
+        status, result = state.sleep_host()
+
+        if os.name == "nt":
+            self.assertEqual(202, status)
+            self.assertTrue(result["accepted"])
+            self.assertEqual([True], scheduled)
+        else:
+            self.assertEqual(501, status)
+            self.assertEqual([], scheduled)
 
     def test_profile_selects_its_own_loopback_bridges(self):
         state = GatewayState(self.config_path, None)

@@ -45,6 +45,7 @@ per-profile Bridge when its credentials or runtime state differ.
 - `POST /api/v1/discord/audio/{select|volume|mute}` - audio control.
 - `GET /api/v1/virtualhere/state` - VirtualHere state and shared devices.
 - `POST /api/v1/virtualhere/{use|stop|auto|restart}` - VirtualHere action.
+- `POST /api/v1/system/sleep` - schedule Windows sleep after the authenticated response is sent.
 
 All endpoints except `hello` and `pair` require `Authorization: Bearer ...`.
 Mutating actions also require a unique `X-Request-Id`. Discord snowflakes,

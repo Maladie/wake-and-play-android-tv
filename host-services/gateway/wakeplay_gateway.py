@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import ssl
+import subprocess
 import threading
 import time
 import urllib.error
@@ -172,8 +173,40 @@ class GatewayState:
                     "available": virtualhere_ok and bool(virtualhere.get("installed", False)),
                     "health": virtualhere,
                 },
+                "host_sleep": {"available": os.name == "nt"},
             },
         }
+
+    @staticmethod
+    def _sleep_windows() -> None:
+        command = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "[System.Windows.Forms.Application]::SetSuspendState("
+            "[System.Windows.Forms.PowerState]::Suspend, $true, $false)"
+        )
+        try:
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                check=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as error:
+            print(f"Host sleep command failed: {error}", flush=True)
+
+    def _schedule_system_sleep(self) -> None:
+        timer = threading.Timer(0.75, self._sleep_windows)
+        timer.daemon = True
+        timer.start()
+
+    def sleep_host(self) -> tuple[int, Any]:
+        if os.name != "nt":
+            return HTTPStatus.NOT_IMPLEMENTED, {
+                "ok": False,
+                "error": "Host sleep is only available on Windows.",
+            }
+        self._schedule_system_sleep()
+        return HTTPStatus.ACCEPTED, {"ok": True, "accepted": True}
 
     def profiles_summary(self) -> dict[str, Any]:
         original_profile = self.profile_id
@@ -582,6 +615,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self.require_auth():
                 return
             profile_id = self.select_profile()
+            if path == f"{API_PREFIX}/system/sleep":
+                request_id = self.headers.get("X-Request-Id", "").strip()
+                if not request_id or len(request_id) > 128:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "A valid X-Request-Id header is required."})
+                    return
+                self.read_json()
+                status, result = self.state.idempotent(
+                    f"system-sleep:{request_id}", self.state.sleep_host)
+                self.send_json(status, result)
+                return
             prefix = f"{API_PREFIX}/vibepollo/repair/"
             if path.startswith(prefix):
                 action = path[len(prefix):]
