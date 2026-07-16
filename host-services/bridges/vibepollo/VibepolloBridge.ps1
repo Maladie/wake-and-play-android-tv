@@ -461,11 +461,12 @@ function Build-StreamSourceDiagnostics {
 }
 
 function Get-StreamSourceDiagnostics {
+    param([switch]$Force)
     $now = Get-Date
     # Unified Remote polls this endpoint frequently. The source set requires
     # several authenticated API calls, so recomputing it for every poll can
     # permanently starve /health on this deliberately small loopback server.
-    if ($null -ne $script:DiagnosticsCache -and
+    if (-not $Force -and $null -ne $script:DiagnosticsCache -and
         (($now - $script:DiagnosticsCacheTime).TotalSeconds -lt 60)) {
         return $script:DiagnosticsCache
     }
@@ -622,7 +623,8 @@ try {
                     Send-JsonResponse $request.Stream (Get-Snapshot -Force:$force)
                 }
                 '^/diagnostics/stream-sources$' {
-                    Send-JsonResponse $request.Stream (Get-StreamSourceDiagnostics)
+                    $force = [string]$request.Query["force"] -in @("1", "true", "yes")
+                    Send-JsonResponse $request.Stream (Get-StreamSourceDiagnostics -Force:$force)
                 }
                 '^/apps$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ apps = (Get-Snapshot).apps }) }
                 '^/clients$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ clients = (Get-Snapshot).clients }) }

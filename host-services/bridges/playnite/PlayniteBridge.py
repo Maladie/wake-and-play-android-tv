@@ -40,6 +40,7 @@ class StreamDisplayResolver:
         self.endpoint = vibepollo_bridge.rstrip("/") + "/diagnostics/stream-sources" \
             if vibepollo_bridge else ""
         self.last_check = 0.0
+        self.last_forced_check = 0.0
         self.cached = ""
 
     @staticmethod
@@ -76,7 +77,11 @@ class StreamDisplayResolver:
             return self.cached
         self.last_check = now
         try:
-            with urllib.request.urlopen(self.endpoint, timeout=0.75) as response:
+            endpoint = self.endpoint
+            if not self.cached and now - self.last_forced_check >= 5.0:
+                endpoint += "?force=1"
+                self.last_forced_check = now
+            with urllib.request.urlopen(endpoint, timeout=0.75) as response:
                 payload = json.loads(response.read(256 * 1024).decode("utf-8-sig"))
             displays = self.displays_from_payload(payload)
             self.cached = displays[0] if len(displays) == 1 else ""
