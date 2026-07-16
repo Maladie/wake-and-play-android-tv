@@ -2,7 +2,8 @@ param(
     [string]$InstallDirectory = "C:\Tools\WakePlayGateway",
     [int]$Port = 8785,
     [switch]$SkipFirewall,
-    [switch]$SkipScheduledTask
+    [switch]$SkipScheduledTask,
+    [switch]$SkipStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,28 +72,33 @@ if (-not $SkipFirewall) {
         -Profile Private -Protocol TCP -LocalPort $Port -RemoteAddress LocalSubnet | Out-Null
 }
 
-$pairingCode = [string](Get-Random -Minimum 100000 -Maximum 999999)
-$startScript = Join-Path $InstallDirectory "Start-WakePlayGateway.ps1"
-$logPath = Join-Path $InstallDirectory "gateway.log"
-$errorPath = Join-Path $InstallDirectory "gateway-error.log"
-$process = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript,
-        "-PairingCode", $pairingCode) `
-    -RedirectStandardOutput $logPath -RedirectStandardError $errorPath
+$pairingCode = $null
+$processId = $null
+if (-not $SkipStart) {
+    $pairingCode = [string](Get-Random -Minimum 100000 -Maximum 999999)
+    $startScript = Join-Path $InstallDirectory "Start-WakePlayGateway.ps1"
+    $logPath = Join-Path $InstallDirectory "gateway.log"
+    $errorPath = Join-Path $InstallDirectory "gateway-error.log"
+    $process = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru `
+        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript,
+            "-PairingCode", $pairingCode) `
+        -RedirectStandardOutput $logPath -RedirectStandardError $errorPath
 
-Start-Sleep -Milliseconds 900
-if ($process.HasExited) {
-    $details = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { "" }
-    throw "Gateway exited during startup. $details"
+    Start-Sleep -Milliseconds 900
+    if ($process.HasExited) {
+        $details = if (Test-Path -LiteralPath $errorPath) { Get-Content -LiteralPath $errorPath -Raw } else { "" }
+        throw "Gateway exited during startup. $details"
+    }
+    $processId = $process.Id
 }
 
 [pscustomobject]@{
     installed = $true
     directory = $InstallDirectory
     port = $Port
-    process_id = $process.Id
+    process_id = $processId
     pairing_code = $pairingCode
-    pairing_expires_minutes = 10
+    pairing_expires_minutes = $(if ($SkipStart) { 0 } else { 10 })
     scheduled_task = (-not $SkipScheduledTask)
     firewall_rule = (-not $SkipFirewall)
 }

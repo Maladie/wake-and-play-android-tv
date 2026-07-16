@@ -2,9 +2,11 @@
 [CmdletBinding()]
 param(
     [string]$InstallDirectory = "C:\Tools\WakePlayHost",
+    [string]$GatewayDirectory = "",
     [int]$GatewayPort = 8785,
     [switch]$SkipFirewall,
-    [switch]$SkipScheduledTask
+    [switch]$SkipScheduledTask,
+    [switch]$SkipStart
 )
 
 Set-StrictMode -Version Latest
@@ -24,7 +26,9 @@ if (-not (Test-Path -LiteralPath $gatewaySource) -or
     throw "Run this installer from the versioned host-services package."
 }
 
-$gatewayDirectory = Join-Path $InstallDirectory "gateway"
+if ([string]::IsNullOrWhiteSpace($GatewayDirectory)) {
+    $GatewayDirectory = Join-Path $InstallDirectory "gateway"
+}
 $sourceDirectory = Join-Path $InstallDirectory "bridge-source"
 $installScripts = Join-Path $InstallDirectory "install"
 New-Item -ItemType Directory -Path $InstallDirectory, $sourceDirectory, $installScripts -Force | Out-Null
@@ -39,8 +43,10 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Install-WakePlayProfile.ps1") `
     -Destination $installScripts -Force
 
 $gatewayInstaller = Join-Path $gatewaySource "Install-WakePlayGateway.ps1"
-& $gatewayInstaller -InstallDirectory $gatewayDirectory -Port $GatewayPort `
-    -SkipFirewall:$SkipFirewall -SkipScheduledTask:$SkipScheduledTask
+& $gatewayInstaller -InstallDirectory $GatewayDirectory -Port $GatewayPort `
+    -SkipFirewall:$SkipFirewall -SkipScheduledTask:$SkipScheduledTask `
+    -SkipStart:$SkipStart
 
 Write-Host "Wake & Play host components installed in $InstallDirectory" -ForegroundColor Green
 Write-Host "Next, run install\Install-WakePlayProfile.ps1 as each target Windows user."
+Write-Host "Gateway configuration: $(Join-Path $GatewayDirectory 'gateway.json')"
