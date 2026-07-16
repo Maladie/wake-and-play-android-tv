@@ -158,6 +158,27 @@ class GatewayState:
                 json.JSONDecodeError) as error:
             return False, {"error": str(error)}
 
+    def proxy_bytes(self, name: str, path: str, timeout: float = 8.0) \
+            -> tuple[int, bytes, str]:
+        try:
+            request = urllib.request.Request(self.bridge_url(name, path), method="GET")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                length = int(response.headers.get("Content-Length", "0") or 0)
+                if length < 1 or length > 8 * 1024 * 1024:
+                    raise ValueError("Artwork response has an unsupported size.")
+                body = response.read(8 * 1024 * 1024 + 1)
+                if len(body) != length or len(body) > 8 * 1024 * 1024:
+                    raise ValueError("Artwork response is incomplete or too large.")
+                content_type = response.headers.get_content_type()
+                if not content_type.startswith("image/"):
+                    raise ValueError("Playnite Bridge returned non-image artwork.")
+                return HTTPStatus.OK, body, content_type
+        except urllib.error.HTTPError as error:
+            return error.code, b"", "application/octet-stream"
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            return HTTPStatus.BAD_GATEWAY, compact_json({"error": str(error)}), \
+                "application/json; charset=utf-8"
+
     def proxy_json(self, name: str, path: str, body: dict[str, Any],
                    timeout: float = 8.0) -> tuple[bool, Any]:
         try:
@@ -257,7 +278,10 @@ class GatewayState:
                 display_name = re.sub(r"[\x00-\x1f\x7f]", " ", display_name).strip()
                 discord = self.discord_status()
                 vibepollo_online, _ = self.proxy("vibepollo", "/health", timeout=1.0)
-                playnite_online, _ = self.proxy("playnite", "/health", timeout=1.0)
+                playnite_online, playnite_health = self.proxy(
+                    "playnite", "/health", timeout=1.0)
+                playnite_connector = playnite_online and bool(
+                    playnite_health.get("connector_connected", False))
                 virtualhere_online = False
                 if discord["bridge_online"]:
                     virtualhere_ok, virtualhere = self.proxy(
@@ -267,7 +291,7 @@ class GatewayState:
                 if not suggested_profile_id and discord["rpc_connected"]:
                     suggested_profile_id = str(profile_id)
                 if not available_profile_id and (
-                        discord["bridge_online"] or vibepollo_online):
+                        discord["bridge_online"] or vibepollo_online or playnite_online):
                     available_profile_id = str(profile_id)
                 profiles.append({
                     "id": str(profile_id),
@@ -277,6 +301,7 @@ class GatewayState:
                     "discord_authenticated": discord["authenticated"],
                     "vibepollo_bridge_online": vibepollo_online,
                     "playnite_bridge_online": playnite_online,
+                    "playnite_connector_connected": playnite_connector,
                     "virtualhere_available": virtualhere_online,
                 })
         finally:
@@ -564,6 +589,19 @@ class GatewayState:
                 result, "Unable to load the Playnite library."),
         }
 
+    def playnite_artwork(self, game_id: Any, kind: Any) -> tuple[int, bytes, str]:
+        normalized_id = str(game_id or "").strip()
+        normalized_kind = str(kind or "cover").strip().lower()
+        if not PLAYNITE_GAME_ID_PATTERN.fullmatch(normalized_id):
+            raise ValueError("Invalid Playnite game ID.")
+        if normalized_kind not in {"cover", "background", "icon"}:
+            raise ValueError("Invalid artwork kind.")
+        path = "/artwork?" + urllib.parse.urlencode({
+            "game_id": normalized_id,
+            "kind": normalized_kind,
+        })
+        return self.proxy_bytes("playnite", path, timeout=8.0)
+
     def playnite_state(self, resource: str) -> tuple[int, Any]:
         paths = {
             "current": "/game/current",
@@ -654,6 +692,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_binary(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(int(status))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length < 0 or length > MAX_BODY_BYTES:
@@ -730,6 +777,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
             status, result = self.state.playnite_library(
                 query.get("cursor", [""])[0], query.get("limit", ["50"])[0])
             self.send_json(status, result)
+        elif path == f"{API_PREFIX}/playnite/artwork":
+            status, body, content_type = self.state.playnite_artwork(
+                query.get("game_id", [""])[0], query.get("kind", ["cover"])[0])
+            if status == HTTPStatus.OK:
+                self.send_binary(status, body, content_type)
+            else:
+                self.send_json(status, {"error": "Playnite artwork is unavailable."})
         elif path == f"{API_PREFIX}/playnite/game/current":
             status, result = self.state.playnite_state("current")
             self.send_json(status, result)

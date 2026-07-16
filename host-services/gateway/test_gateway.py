@@ -287,6 +287,22 @@ class GatewayStateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             state.playnite_library("", 500)
 
+    def test_playnite_artwork_uses_allowlisted_game_and_kind(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy_bytes = lambda name, path, timeout=8.0: (
+            requests.append((name, path)) or (200, b"image", "image/png"))
+        status, body, content_type = state.playnite_artwork(
+            "840317c9-b9a4-4f72-be8e-807414e36a9b", "cover")
+        self.assertEqual((200, b"image", "image/png"), (status, body, content_type))
+        parsed = urllib.parse.urlsplit(requests[0][1])
+        self.assertEqual("/artwork", parsed.path)
+        self.assertEqual(["cover"], urllib.parse.parse_qs(parsed.query)["kind"])
+        with self.assertRaises(ValueError):
+            state.playnite_artwork("../../secret", "cover")
+        with self.assertRaises(ValueError):
+            state.playnite_artwork("840317c9-b9a4-4f72-be8e-807414e36a9b", "file")
+
     def test_playnite_start_accepts_only_a_guid_and_uses_profile_bridge(self):
         state = GatewayState(self.config_path, None)
         requests = []

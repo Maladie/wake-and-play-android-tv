@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from PatchPlayniteConnector import (
     PATCH_MARKER, READER_ANCHOR, SEND_BUILD_ANCHOR, SEND_PARAM_ANCHOR,
@@ -69,6 +71,22 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual("Baba Is You", first["games"][0]["name"])
         self.assertEqual("Resident Evil 3", second["games"][0]["name"])
         self.assertEqual("", second["next_cursor"])
+
+    def test_artwork_is_resolved_only_from_library_metadata(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as artwork:
+            artwork.write(b"\x89PNG\r\n\x1a\nimage")
+            artwork_path = artwork.name
+        try:
+            self.state.handle_message({"type": "games", "payload": [{
+                "id": GAME_ID, "name": "Baba Is You", "boxArtPath": artwork_path,
+            }]})
+            body, content_type = self.state.artwork(GAME_ID, "cover")
+            self.assertTrue(body.startswith(b"\x89PNG"))
+            self.assertEqual("image/png", content_type)
+            with self.assertRaises(ValueError):
+                self.state.artwork(GAME_ID, "../../secret")
+        finally:
+            Path(artwork_path).unlink(missing_ok=True)
 
     def test_forced_stop_is_never_generated(self):
         self.state.handle_message({

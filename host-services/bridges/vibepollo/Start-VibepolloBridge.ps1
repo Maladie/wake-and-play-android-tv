@@ -8,4 +8,5 @@ try {
 } catch {}
 Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $bridge)
-)
+) -RedirectStandardOutput (Join-Path $PSScriptRoot "vibepollo-bridge.log") `
+  -RedirectStandardError (Join-Path $PSScriptRoot "vibepollo-bridge-error.log")

@@ -192,7 +192,7 @@ if (-not $SkipVibepollo) {
     }
     Set-ConfigPort $vibepolloConfig "listen_port" $VibepolloPort
     Register-BridgeTask "Wake & Play Vibepollo Bridge ($ProfileId)" `
-        (Join-Path $vibepolloDirectory "Start-VibepolloBridge.ps1")
+        (Join-Path $vibepolloDirectory "VibepolloBridge.ps1")
 }
 
 $playniteDirectory = $null

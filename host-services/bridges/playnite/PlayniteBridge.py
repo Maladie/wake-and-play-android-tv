@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import mimetypes
 import os
 import re
 import subprocess
@@ -24,6 +25,7 @@ from typing import Any, Callable
 GAME_ID_PATTERN = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 MAX_BODY_BYTES = 16 * 1024
+MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 REQUIRED_STABLE_SAMPLES = 3
 DISPLAY_NAME_PATTERN = re.compile(r"^(?:\\\\\.\\)?DISPLAY[0-9]+$", re.IGNORECASE)
 
@@ -507,6 +509,34 @@ class BridgeState:
                 "plugins": list(self.plugins),
             }
 
+    def artwork(self, game_id: Any, kind: str) -> tuple[bytes, str]:
+        normalized = self.game_id(game_id)
+        fields = {
+            "cover": ("boxArtPath", "cover", "coverImage"),
+            "background": ("backgroundImagePath", "background", "backgroundImage"),
+            "icon": ("iconPath", "icon"),
+        }
+        if kind not in fields:
+            raise ValueError("Invalid artwork kind.")
+        with self.lock:
+            game = dict(self.library.get(normalized) or {})
+        if not game:
+            raise FileNotFoundError("Playnite game was not found.")
+        value = next((str(game.get(field) or "").strip()
+                      for field in fields[kind] if game.get(field)), "")
+        if not value and kind == "background":
+            value = str(game.get("boxArtPath") or "").strip()
+        path = Path(value).expanduser()
+        if not value or not path.is_file():
+            raise FileNotFoundError("Artwork is unavailable for this game.")
+        size = path.stat().st_size
+        if size <= 0 or size > MAX_ARTWORK_BYTES:
+            raise ValueError("Artwork file has an unsupported size.")
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if not content_type.startswith("image/"):
+            raise ValueError("Artwork file is not an image.")
+        return path.read_bytes(), content_type
+
     def events_after(self, sequence: int, timeout: float) -> list[dict[str, Any]]:
         deadline = time.monotonic() + timeout
         with self.events_changed:
@@ -681,6 +711,15 @@ class PlayniteHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_binary(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(int(status))
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length < 0 or length > MAX_BODY_BYTES:
@@ -706,6 +745,11 @@ class PlayniteHandler(BaseHTTPRequestHandler):
                 cursor = query.get("cursor", ["0"])[0] or "0"
                 limit = int(query.get("limit", ["50"])[0])
                 self.send_json(HTTPStatus.OK, self.state.library_page(cursor, limit))
+            elif target.path == "/artwork":
+                body, content_type = self.state.artwork(
+                    query.get("game_id", [""])[0],
+                    query.get("kind", ["cover"])[0])
+                self.send_binary(HTTPStatus.OK, body, content_type)
             elif target.path == "/game/current":
                 with self.state.lock:
                     self.send_json(HTTPStatus.OK, dict(self.state.current))
@@ -718,6 +762,8 @@ class PlayniteHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"events": events})
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})
+        except FileNotFoundError as error:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
         except (ValueError, json.JSONDecodeError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except Exception as error:

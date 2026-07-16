@@ -75,6 +75,7 @@ $script:CacheTime = @{}
 $script:DeniedKeys = @{}
 $script:LastApiError = ""
 $script:LastApiSuccess = $null
+$script:ApiUnavailableUntil = [datetime]::MinValue
 $script:StartedAt = Get-Date
 $script:SessionSamples = @{}
 
@@ -106,7 +107,7 @@ function Invoke-VibepolloApi {
         $process.StandardInput.Close()
         $stdout = $process.StandardOutput.ReadToEnd()
         $stderr = $process.StandardError.ReadToEnd()
-        if (-not $process.WaitForExit(20000)) {
+        if (-not $process.WaitForExit(6000)) {
             try { $process.Kill() } catch {}
             throw "TLS transport timed out"
         }
@@ -115,12 +116,16 @@ function Invoke-VibepolloApi {
         if (-not $response.ok) { throw "HTTP $($response.status): $($response.error)" }
         $script:LastApiError = ""
         $script:LastApiSuccess = Get-Date
+        $script:ApiUnavailableUntil = [datetime]::MinValue
         if ([string]::IsNullOrWhiteSpace([string]$response.content)) { return [pscustomobject]@{ status = $true } }
         if ($RawText) { return [string]$response.content }
         return ([string]$response.content | ConvertFrom-Json)
     }
     catch {
         $script:LastApiError = "API $Method $Path failed: $($_.Exception.Message)"
+        if ($_.Exception.Message -match 'HTTP 0|timed out|TimeoutError|ConnectionRefused') {
+            $script:ApiUnavailableUntil = (Get-Date).AddSeconds(5)
+        }
         Write-BridgeLog $script:LastApiError "WARN"
         throw $script:LastApiError
     }
@@ -129,6 +134,9 @@ function Invoke-VibepolloApi {
 function Get-CachedApi {
     param([string]$Key, [string]$Path, [double]$TtlSeconds, [switch]$Force, [switch]$RawText)
     $now = Get-Date
+    if ($now -lt $script:ApiUnavailableUntil) {
+        return $(if ($script:Cache.ContainsKey($Key)) { $script:Cache[$Key] } else { $null })
+    }
     if ($script:DeniedKeys.ContainsKey($Key)) { return $null }
     $fresh = $script:Cache.ContainsKey($Key) -and $script:CacheTime.ContainsKey($Key) -and
         (($now - $script:CacheTime[$Key]).TotalSeconds -lt $TtlSeconds)

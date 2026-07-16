@@ -39,7 +39,10 @@ def main():
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(req, context=context, timeout=15) as response:
+        # The bridge is intentionally local and single-process. A short timeout
+        # prevents one unavailable Vibepollo API from blocking health checks and
+        # every remote client queued behind the failing request.
+        with urllib.request.urlopen(req, context=context, timeout=3) as response:
             content = response.read()
             if output_path:
                 with open(output_path, "wb") as output:
