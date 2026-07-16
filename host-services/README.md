@@ -46,6 +46,16 @@ The profile installer copies clean Bridge sources into the current user's
 registers per-user logon tasks and adds the loopback endpoints to the Gateway
 profile registry. Restart the Gateway after changing the registry.
 
+Older single-profile installations that already use the flat `C:\Tools`
+layout can add only the Playnite component without replacing credentials:
+
+```powershell
+.\host-services\install\Install-FlatLayoutPlayniteBridge.ps1
+```
+
+The compatibility installer preserves `gateway.json`, certificates and paired
+clients. It does not restart Gateway or Playnite.
+
 Wake & Play lists the registered display names under Host integrations and
 stores the selected profile independently for every Moonlight host.
 

@@ -33,6 +33,8 @@ Copy-Item -LiteralPath (Join-Path $bridgeSource "discord") `
     -Destination $sourceDirectory -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $bridgeSource "vibepollo") `
     -Destination $sourceDirectory -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $bridgeSource "playnite") `
+    -Destination $sourceDirectory -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Install-WakePlayProfile.ps1") `
     -Destination $installScripts -Force
 
