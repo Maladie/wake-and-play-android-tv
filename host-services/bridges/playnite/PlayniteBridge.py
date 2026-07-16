@@ -289,6 +289,7 @@ class BridgeState:
         self.lock = threading.RLock()
         self.events_changed = threading.Condition(self.lock)
         self.connected = False
+        self.connector_generation = 0
         self.last_error = "Playnite connector is not connected."
         self.library: dict[str, dict[str, Any]] = {}
         self.library_staging: dict[str, dict[str, Any]] = {}
@@ -336,6 +337,8 @@ class BridgeState:
                       error: str = "") -> None:
         with self.lock:
             changed = self.connected != connected
+            if connected and not self.connected:
+                self.connector_generation += 1
             self.connected = connected
             self.command_sender = sender
             self.last_error = error[:500]
@@ -762,6 +765,7 @@ class PlayniteHandler(BaseHTTPRequestHandler):
                     self.send_json(HTTPStatus.OK, {
                         "ok": True,
                         "connector_connected": self.state.connected,
+                        "connector_generation": self.state.connector_generation,
                         "library_count": len(self.state.library),
                         "error": self.state.last_error,
                     })

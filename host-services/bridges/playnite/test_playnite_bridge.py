@@ -23,6 +23,14 @@ class BridgeStateTest(unittest.TestCase):
             lambda process_id: not self.closed_processes.append(process_id),
             lambda: self.fullscreen_calls.append(True) or {"started": False})
 
+    def test_connector_generation_advances_only_after_reconnect(self):
+        first_generation = self.state.connector_generation
+        self.state.set_transport(True, self.commands.append)
+        self.assertEqual(first_generation, self.state.connector_generation)
+        self.state.set_transport(False, None, "closed")
+        self.state.set_transport(True, self.commands.append)
+        self.assertEqual(first_generation + 1, self.state.connector_generation)
+
     def test_start_is_allowlisted_and_closes_privacy_gate(self):
         result = self.state.start_game(GAME_ID.upper())
 
