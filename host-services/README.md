@@ -40,6 +40,13 @@ Windows profile. Its Client ID and Client Secret are entered only on the first
 installation and protected in the machine host configuration. Every Windows
 profile still stores and refreshes its own Discord OAuth token.
 
+The Vibepollo page can either preserve an existing API token or create a new
+least-privilege token through local `POST /api/token`. Automatic creation asks
+for the local Vibepollo administrator credentials, submits the versioned list
+of exact path/method scopes, stores only the returned token with per-user DPAPI
+and does not persist the administrator password. The complete scope document
+is `bridges/vibepollo/moonwaker-token-scopes.example.json`.
+
 The installer deliberately stages services for the next Windows restart. This
 avoids replacing a Gateway or Playnite Connector while either is serving an
 active stream.

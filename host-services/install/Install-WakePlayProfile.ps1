@@ -182,6 +182,7 @@ if (-not $SkipVibepollo) {
     $vibepolloDirectory = Install-BridgeFiles "vibepollo" @(
         "VibepolloBridge.ps1", "VibepolloTransport.py",
         "Configure-VibepolloBridge.ps1", "config.example.json",
+        "moonwaker-token-scopes.example.json",
         "Start-VibepolloBridge.ps1", "Stop-VibepolloBridge.ps1",
         "Test-VibepolloBridge.ps1", "README.md")
     $vibepolloConfig = Join-Path $vibepolloDirectory "config.json"

@@ -166,6 +166,57 @@ function Initialize-MachineDiscordApplication {
     }
 }
 
+function New-MoonWakerVibepolloToken {
+    $baseUrl = [string]$env:MOONWAKER_VIBEPOLLO_URL
+    $username = [string]$env:MOONWAKER_VIBEPOLLO_ADMIN_USERNAME
+    $password = [string]$env:MOONWAKER_VIBEPOLLO_ADMIN_PASSWORD
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) { $baseUrl = "https://127.0.0.1:47990" }
+    $uri = $null
+    if (-not [uri]::TryCreate($baseUrl, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne "https" -or $uri.Host -notin @("127.0.0.1", "localhost")) {
+        throw "Vibepollo automatic token creation is restricted to its local HTTPS API."
+    }
+    if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+        throw "Vibepollo administrator username and password are required to create a token."
+    }
+    $transport = Join-Path $packageRoot "bridges\vibepollo\VibepolloTransport.py"
+    $scopePath = Join-Path $packageRoot "bridges\vibepollo\moonwaker-token-scopes.example.json"
+    if (-not (Test-Path -LiteralPath $transport) -or -not (Test-Path -LiteralPath $scopePath)) {
+        throw "The Vibepollo token helper payload is incomplete."
+    }
+    $scopeDocument = Get-Content -LiteralPath $scopePath -Raw | ConvertFrom-Json
+    $request = [ordered]@{
+        base_url = $baseUrl.TrimEnd('/')
+        path = "/api/token"
+        method = "POST"
+        username = $username
+        password = $password
+        body = @{ scopes = @($scopeDocument.scopes) }
+    } | ConvertTo-Json -Depth 20 -Compress
+    try {
+        $raw = $request | & python.exe $transport
+        $transportResult = $raw | ConvertFrom-Json
+        if (-not $transportResult.ok) {
+            throw "Vibepollo rejected token creation (HTTP $($transportResult.status)). Check administrator credentials."
+        }
+        $content = [string]$transportResult.content
+        try { $response = $content | ConvertFrom-Json } catch { $response = $content.Trim() }
+        $token = if ($response -is [string]) { [string]$response } `
+            elseif ($response.PSObject.Properties["token"]) { [string]$response.token } `
+            elseif ($response.PSObject.Properties["access_token"]) { [string]$response.access_token } `
+            else { "" }
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            throw "Vibepollo created no readable token in its response."
+        }
+        $env:MOONWAKER_VIBEPOLLO_TOKEN = $token
+        Write-Host "Created a least-privilege Vibepollo token for the MoonWaker profile."
+    } finally {
+        $password = $null
+        $request = $null
+        $env:MOONWAKER_VIBEPOLLO_ADMIN_PASSWORD = $null
+    }
+}
+
 Assert-AdministratorAndInteractiveUser
 foreach ($command in @("python.exe", "openssl.exe")) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -193,6 +244,9 @@ $profileRoot = Join-Path $env:LOCALAPPDATA "WakePlayHost\profiles\$ProfileId"
 if (-not $SkipDiscord) {
     Initialize-MachineDiscordApplication `
         (Test-Path -LiteralPath (Join-Path $profileRoot "discord\discord_bridge_config.json"))
+}
+if (-not $SkipVibepollo -and $env:MOONWAKER_VIBEPOLLO_CREATE_TOKEN -eq "1") {
+    New-MoonWakerVibepolloToken
 }
 $resolvedPlaynite = if ($SkipPlaynite) { "" } else { Resolve-PlayniteInstall }
 if (-not $SkipPlaynite) {
@@ -235,4 +289,5 @@ try {
 } finally {
     $env:MOONWAKER_DISCORD_CLIENT_SECRET = $null
     $env:MOONWAKER_VIBEPOLLO_TOKEN = $null
+    $env:MOONWAKER_VIBEPOLLO_ADMIN_PASSWORD = $null
 }

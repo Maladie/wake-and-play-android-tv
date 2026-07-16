@@ -42,6 +42,9 @@ namespace MoonWaker.HostInstaller
         private readonly TextBox discordSecret = new TextBox();
         private readonly TextBox vibepolloUrl = new TextBox();
         private readonly TextBox vibepolloToken = new TextBox();
+        private readonly CheckBox createVibepolloToken = new CheckBox();
+        private readonly TextBox vibepolloAdmin = new TextBox();
+        private readonly TextBox vibepolloPassword = new TextBox();
         private readonly TextBox playnitePath = new TextBox();
         private readonly RichTextBox log = new RichTextBox();
         private readonly ProgressBar progress = new ProgressBar();
@@ -49,8 +52,8 @@ namespace MoonWaker.HostInstaller
         public InstallerForm()
         {
             Text = "MoonWaker Host Installer";
-            ClientSize = new Size(760, 650);
-            MinimumSize = new Size(760, 650);
+            ClientSize = new Size(760, 770);
+            MinimumSize = new Size(760, 770);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = background;
             ForeColor = Color.White;
@@ -67,18 +70,18 @@ namespace MoonWaker.HostInstaller
             step.SetBounds(520, 34, 195, 28);
             Controls.Add(step);
 
-            content.SetBounds(38, 88, 684, 480);
+            content.SetBounds(38, 88, 684, 595);
             content.BackColor = panelColor;
             Controls.Add(content);
 
             StyleButton(back, false);
             back.Text = "Wstecz";
-            back.SetBounds(438, 588, 130, 42);
+            back.SetBounds(438, 704, 130, 42);
             back.Click += delegate { if (page > 0) { page--; ShowPage(); } };
             Controls.Add(back);
 
             StyleButton(next, true);
-            next.SetBounds(582, 588, 140, 42);
+            next.SetBounds(582, 704, 140, 42);
             next.Click += NextClicked;
             Controls.Add(next);
 
@@ -88,6 +91,12 @@ namespace MoonWaker.HostInstaller
             vibepollo.Checked = true;
             playnite.Checked = true;
             vibepolloUrl.Text = "https://127.0.0.1:47990";
+            createVibepolloToken.CheckedChanged += delegate
+            {
+                vibepolloToken.Enabled = !createVibepolloToken.Checked;
+                vibepolloAdmin.Enabled = createVibepolloToken.Checked;
+                vibepolloPassword.Enabled = createVibepolloToken.Checked;
+            };
             playnitePath.Text = FindPlaynite();
             ShowPage();
         }
@@ -120,25 +129,57 @@ namespace MoonWaker.HostInstaller
             next.Text = "Zainstaluj";
             AddHeading("Integracje", "Dane aplikacji Discord podajesz tylko raz na cały komputer.");
 
-            ConfigureCheckBox(discord, "Discord + VirtualHere", 30, 100);
-            ConfigureTextBox(discordId, 230, 94, 185, false);
-            ConfigureTextBox(discordSecret, 430, 94, 215, true);
-            AddSmallLabel("Client ID aplikacji (pierwsza instalacja)", 230, 78, 185);
-            AddSmallLabel("Client Secret (pierwsza instalacja)", 430, 78, 215);
+            ConfigureCheckBox(discord, "Discord + VirtualHere", 30, 104);
+            ConfigureTextBox(discordId, 230, 98, 185, false);
+            ConfigureTextBox(discordSecret, 430, 98, 215, true);
+            AddSmallLabel("Application ID / Client ID", 230, 80, 185);
+            AddSmallLabel("OAuth2 Client Secret", 430, 80, 215);
+            LinkLabel discordHelp = new LinkLabel();
+            discordHelp.Text = "Utwórz aplikację w Discord Developer Portal i skopiuj pola z General Information oraz OAuth2.";
+            discordHelp.LinkColor = Color.FromArgb(155, 145, 255);
+            discordHelp.ActiveLinkColor = Color.White;
+            discordHelp.BackColor = panelColor;
+            discordHelp.SetBounds(230, 137, 415, 32);
+            discordHelp.LinkClicked += delegate { Process.Start("https://discord.com/developers/applications"); };
+            content.Controls.Add(discordHelp);
+            Label discordScopes = MakeLabel("Scope’y: rpc, identify, guilds, rpc.voice.read, rpc.voice.write", 8.5F, FontStyle.Regular);
+            discordScopes.ForeColor = Color.FromArgb(155, 161, 180);
+            discordScopes.SetBounds(230, 165, 415, 22);
+            content.Controls.Add(discordScopes);
 
-            ConfigureCheckBox(vibepollo, "Vibepollo", 30, 190);
-            ConfigureTextBox(vibepolloUrl, 230, 184, 185, false);
-            ConfigureTextBox(vibepolloToken, 430, 184, 215, true);
-            AddSmallLabel("Adres lokalnego API", 230, 168, 185);
-            AddSmallLabel("Token API", 430, 168, 215);
+            ConfigureCheckBox(vibepollo, "Vibepollo", 30, 218);
+            ConfigureTextBox(vibepolloUrl, 230, 212, 185, false);
+            ConfigureTextBox(vibepolloToken, 430, 212, 215, true);
+            AddSmallLabel("Adres lokalnego API", 230, 194, 185);
+            AddSmallLabel("Istniejący token (opcjonalnie)", 430, 194, 215);
 
-            ConfigureCheckBox(playnite, "Playnite", 30, 280);
-            ConfigureTextBox(playnitePath, 230, 274, 350, false);
-            AddSmallLabel("Katalog Playnite", 230, 258, 350);
+            ConfigureCheckBox(createVibepolloToken, "Utwórz token automatycznie", 230, 255);
+            ConfigureTextBox(vibepolloAdmin, 230, 302, 185, false);
+            ConfigureTextBox(vibepolloPassword, 430, 302, 215, true);
+            AddSmallLabel("Login administratora Vibepollo", 230, 284, 185);
+            AddSmallLabel("Hasło — nie zostanie zapisane", 430, 284, 215);
+            vibepolloAdmin.Enabled = createVibepolloToken.Checked;
+            vibepolloPassword.Enabled = createVibepolloToken.Checked;
+            vibepolloToken.Enabled = !createVibepolloToken.Checked;
+            Button showScopes = new Button();
+            StyleButton(showScopes, false);
+            showScopes.Text = "Pokaż 19 wymaganych uprawnień";
+            showScopes.SetBounds(230, 346, 250, 32);
+            showScopes.Click += delegate
+            {
+                MessageBox.Show(this,
+                    "GET\n/api/metadata\n/api/session/status\n/api/host/stats\n/api/host/info\n/api/rtsp/sessions\n/api/webrtc/sessions\n/api/history/sessions/active\n/api/history/sessions\n/api/apps\n/api/clients/list\n/api/rtss/status\n/api/lossless_scaling/status\n/api/logs\n/api/logs/export\n\nPOST\n/api/apps/launch\n/api/apps/close\n/api/clients/disconnect\n/api/restart\n/api/reset-display-device-persistence",
+                    "Uprawnienia tokenu Vibepollo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            content.Controls.Add(showScopes);
+
+            ConfigureCheckBox(playnite, "Playnite", 30, 432);
+            ConfigureTextBox(playnitePath, 230, 426, 350, false);
+            AddSmallLabel("Katalog Playnite", 230, 408, 350);
             Button browse = new Button();
             StyleButton(browse, false);
             browse.Text = "…";
-            browse.SetBounds(590, 274, 55, 34);
+            browse.SetBounds(590, 426, 55, 34);
             browse.Click += delegate
             {
                 using (FolderBrowserDialog dialog = new FolderBrowserDialog())
@@ -149,9 +190,9 @@ namespace MoonWaker.HostInstaller
             };
             content.Controls.Add(browse);
 
-            Label security = MakeLabel("Sekret aplikacji Discord jest chroniony raz na komputerze; każdy profil otrzymuje osobny token użytkownika.", 9F, FontStyle.Regular);
+            Label security = MakeLabel("Tokeny są chronione przez DPAPI. Hasło administratora Vibepollo służy tylko do żądania i nie jest zapisywane.", 9F, FontStyle.Regular);
             security.ForeColor = Color.FromArgb(160, 200, 180);
-            security.SetBounds(30, 370, 620, 45);
+            security.SetBounds(30, 510, 620, 45);
             content.Controls.Add(security);
         }
 
@@ -217,8 +258,11 @@ namespace MoonWaker.HostInstaller
                 return "Pierwsza instalacja na tym komputerze wymaga Client ID i Client Secret aplikacji Discord.";
             if (discord.Checked && !String.IsNullOrWhiteSpace(discordId.Text) && !Regex.IsMatch(discordId.Text.Trim(), "^[0-9]{17,20}$"))
                 return "Client ID Discorda powinien zawierać 17–20 cyfr.";
-            if (vibepollo.Checked && !hasVibepollo && String.IsNullOrWhiteSpace(vibepolloToken.Text))
-                return "Nowy profil Vibepollo wymaga tokenu lokalnego API.";
+            if (vibepollo.Checked && createVibepolloToken.Checked &&
+                (String.IsNullOrWhiteSpace(vibepolloAdmin.Text) || String.IsNullOrWhiteSpace(vibepolloPassword.Text)))
+                return "Automatyczne utworzenie tokenu wymaga loginu i hasła administratora Vibepollo.";
+            if (vibepollo.Checked && !createVibepolloToken.Checked && !hasVibepollo && String.IsNullOrWhiteSpace(vibepolloToken.Text))
+                return "Podaj istniejący token Vibepollo albo wybierz automatyczne utworzenie tokenu.";
             if (playnite.Checked)
             {
                 string path = playnitePath.Text.Trim();
@@ -259,8 +303,12 @@ namespace MoonWaker.HostInstaller
                 info.EnvironmentVariables["MOONWAKER_DISCORD_CLIENT_SECRET"] = discordSecret.Text;
                 info.EnvironmentVariables["MOONWAKER_VIBEPOLLO_URL"] = vibepolloUrl.Text.Trim();
                 info.EnvironmentVariables["MOONWAKER_VIBEPOLLO_TOKEN"] = vibepolloToken.Text;
+                info.EnvironmentVariables["MOONWAKER_VIBEPOLLO_CREATE_TOKEN"] = createVibepolloToken.Checked ? "1" : "0";
+                info.EnvironmentVariables["MOONWAKER_VIBEPOLLO_ADMIN_USERNAME"] = vibepolloAdmin.Text.Trim();
+                info.EnvironmentVariables["MOONWAKER_VIBEPOLLO_ADMIN_PASSWORD"] = vibepolloPassword.Text;
                 discordSecret.Clear();
                 vibepolloToken.Clear();
+                vibepolloPassword.Clear();
 
                 using (Process process = new Process())
                 {
