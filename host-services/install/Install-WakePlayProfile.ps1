@@ -161,7 +161,36 @@ function Initialize-VibepolloConfig {
 
 function Register-BridgeTask {
     param([string]$Name, [string]$StartScript)
+    # Updating an existing machine Task Scheduler entry requires elevation even
+    # when it belongs to the current interactive user. Its command already
+    # points at this stable per-profile path, so keep it instead of failing an
+    # otherwise user-scoped Bridge update.
+    try {
+        $existingTask = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        if ($null -ne $existingTask) {
+            Write-Host "Keeping existing Bridge startup task '$Name'."
+            return
+        }
+    } catch {}
+
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $identityPrincipal = [Security.Principal.WindowsPrincipal]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdministrator = $identityPrincipal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdministrator) {
+        # A standard user cannot register tasks in the root Task Scheduler
+        # folder on every Windows configuration. HKCU Run provides the same
+        # per-profile logon behavior without crossing the user boundary.
+        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $runName = "MoonWaker " + ($Name -replace '[^A-Za-z0-9._ -]', '_')
+        $command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
+        New-Item -Path $runKey -Force | Out-Null
+        Set-ItemProperty -Path $runKey -Name $runName -Value $command
+        Write-Host "Registered per-user Bridge startup '$runName'."
+        return
+    }
+
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
         "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`"")
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
