@@ -88,7 +88,7 @@ namespace MoonWaker.HostInstaller
             next.Click += NextClicked;
             Controls.Add(next);
 
-            profileId.Text = "default";
+            profileId.Text = DetectProfileId();
             profileName.Text = Environment.UserName;
             discord.Checked = true;
             vibepollo.Checked = true;
@@ -102,6 +102,25 @@ namespace MoonWaker.HostInstaller
             };
             playnitePath.Text = FindPlaynite();
             ShowPage();
+        }
+
+        private static string DetectProfileId()
+        {
+            string root = Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData), "WakePlayHost", "profiles");
+            try
+            {
+                if (Directory.Exists(root))
+                {
+                    string[] profiles = Directory.GetDirectories(root);
+                    if (profiles.Length == 1) return Path.GetFileName(profiles[0]);
+                    string existingDefault = Path.Combine(root, "default");
+                    if (Directory.Exists(existingDefault)) return "default";
+                }
+            }
+            catch { }
+            string normalized = Regex.Replace(Environment.UserName, "[^A-Za-z0-9._-]", "_");
+            return String.IsNullOrWhiteSpace(normalized) ? "default" : normalized;
         }
 
         private void ShowPage()

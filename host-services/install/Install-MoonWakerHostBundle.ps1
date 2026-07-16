@@ -18,12 +18,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Assert-AdministratorAndInteractiveUser {
+function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw "MoonWaker Host Installer requires administrator privileges."
-    }
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Assert-InteractiveAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
         $interactiveUser = [string](Get-CimInstance Win32_ComputerSystem).UserName
         if (-not [string]::IsNullOrWhiteSpace($interactiveUser) -and
@@ -223,7 +225,8 @@ function New-MoonWakerVibepolloToken {
     }
 }
 
-Assert-AdministratorAndInteractiveUser
+$script:IsAdministrator = Test-IsAdministrator
+if ($script:IsAdministrator) { Assert-InteractiveAdministrator }
 if (-not (Get-Command "python.exe" -ErrorAction SilentlyContinue)) {
     throw "python.exe is required but was not found in PATH."
 }
@@ -245,6 +248,9 @@ $gatewayDirectory = if ((Test-Path -LiteralPath (Join-Path $legacyGateway "gatew
 $gatewayConfig = Join-Path $gatewayDirectory "gateway.json"
 $gatewayCertificate = Join-Path $gatewayDirectory "gateway-cert.pem"
 $gatewayPrivateKey = Join-Path $gatewayDirectory "gateway-key.pem"
+if (-not $script:IsAdministrator -and -not (Test-Path -LiteralPath $gatewayConfig)) {
+    throw "The machine Gateway must be installed once by an administrator before adding a standard-user profile."
+}
 if ((-not (Test-Path -LiteralPath $gatewayCertificate) -or
     -not (Test-Path -LiteralPath $gatewayPrivateKey)) -and
     -not (Get-Command "openssl.exe" -ErrorAction SilentlyContinue)) {
@@ -253,8 +259,14 @@ if ((-not (Test-Path -LiteralPath $gatewayCertificate) -or
 $ports = Resolve-ProfilePorts $gatewayConfig
 $profileRoot = Join-Path $env:LOCALAPPDATA "WakePlayHost\profiles\$ProfileId"
 if (-not $SkipDiscord) {
-    Initialize-MachineDiscordApplication `
-        (Test-Path -LiteralPath (Join-Path $profileRoot "discord\discord_bridge_config.json"))
+    $profileDiscordConfigured = Test-Path -LiteralPath `
+        (Join-Path $profileRoot "discord\discord_bridge_config.json")
+    try {
+        Initialize-MachineDiscordApplication $profileDiscordConfigured
+    } catch {
+        if (-not $profileDiscordConfigured) { throw }
+        Write-Host "Using this profile's existing Discord application credentials."
+    }
 }
 if (-not $SkipVibepollo -and $env:MOONWAKER_VIBEPOLLO_CREATE_TOKEN -eq "1") {
     New-MoonWakerVibepolloToken
@@ -269,9 +281,13 @@ if (-not $SkipPlaynite) {
 
 if ([string]::IsNullOrWhiteSpace($ProfileName)) { $ProfileName = $env:USERNAME }
 try {
-    Write-Host "Installing machine Gateway and Bridge package..."
-    & $hostInstaller -InstallDirectory $hostRoot -GatewayDirectory $gatewayDirectory `
-        -GatewayPort $GatewayPort -SkipFirewall:$SkipFirewall -SkipStart
+    if ($script:IsAdministrator) {
+        Write-Host "Installing machine Gateway and Bridge package..."
+        & $hostInstaller -InstallDirectory $hostRoot -GatewayDirectory $gatewayDirectory `
+            -GatewayPort $GatewayPort -SkipFirewall:$SkipFirewall -SkipStart
+    } else {
+        Write-Host "Existing machine Gateway detected; updating only this Windows profile."
+    }
 
     Write-Host "Installing integration profile '$ProfileId'..."
     & $profileInstaller -ProfileId $ProfileId -ProfileName $ProfileName `
