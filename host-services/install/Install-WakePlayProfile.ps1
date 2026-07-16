@@ -70,6 +70,18 @@ function Install-BridgeFiles {
     return $destination
 }
 
+function Stop-InstalledBridge {
+    param([string]$BridgeName, [string]$StopScriptName)
+    $directory = Join-Path $profileRoot $BridgeName
+    $stopScript = Join-Path $directory $StopScriptName
+    if (-not (Test-Path -LiteralPath $stopScript)) { return }
+    try {
+        & $stopScript
+    } catch {
+        Write-Warning "Unable to stop the existing $BridgeName Bridge cleanly: $($_.Exception.Message)"
+    }
+}
+
 function Set-ConfigPort {
     param([string]$Path, [string]$Property, [int]$Port)
     $config = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
@@ -163,6 +175,7 @@ function Register-BridgeTask {
 
 $discordDirectory = $null
 if (-not $SkipDiscord) {
+    Stop-InstalledBridge "discord" "Stop-DiscordBridge.ps1"
     $discordDirectory = Install-BridgeFiles "discord" @(
         "DiscordBridge.ps1", "Configure-DiscordBridge.ps1",
         "discord_bridge_config.example.json", "Start-DiscordBridge.ps1",
@@ -179,6 +192,7 @@ if (-not $SkipDiscord) {
 
 $vibepolloDirectory = $null
 if (-not $SkipVibepollo) {
+    Stop-InstalledBridge "vibepollo" "Stop-VibepolloBridge.ps1"
     $vibepolloDirectory = Install-BridgeFiles "vibepollo" @(
         "VibepolloBridge.ps1", "VibepolloTransport.py",
         "Configure-VibepolloBridge.ps1", "config.example.json",
@@ -197,6 +211,7 @@ if (-not $SkipVibepollo) {
 
 $playniteDirectory = $null
 if (-not $SkipPlaynite) {
+    Stop-InstalledBridge "playnite" "Stop-PlayniteBridge.ps1"
     $playniteDirectory = Install-BridgeFiles "playnite" @(
         "PlayniteBridge.py", "config.example.json",
         "Start-PlayniteBridge.ps1", "Stop-PlayniteBridge.ps1",
