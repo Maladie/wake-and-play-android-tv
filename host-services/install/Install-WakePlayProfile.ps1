@@ -13,6 +13,7 @@ param(
     [switch]$SkipVibepollo,
     [switch]$SkipPlaynite,
     [switch]$SkipGatewayRegistration,
+    [switch]$NonInteractiveConfiguration,
     [switch]$SkipStart
 )
 
@@ -91,6 +92,61 @@ function Set-ConfigValue {
     $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Initialize-DiscordConfig {
+    param([string]$Directory, [string]$ConfigPath, [int]$Port)
+    if (-not $NonInteractiveConfiguration) {
+        & (Join-Path $Directory "Configure-DiscordBridge.ps1")
+        return
+    }
+    $clientId = [string]$env:MOONWAKER_DISCORD_CLIENT_ID
+    $clientSecret = [string]$env:MOONWAKER_DISCORD_CLIENT_SECRET
+    if ($clientId -notmatch '^[0-9]{17,20}$' -or [string]::IsNullOrWhiteSpace($clientSecret)) {
+        throw "Discord configuration is missing. Provide it in the MoonWaker installer."
+    }
+    $previousClientId = ""
+    if (Test-Path -LiteralPath $ConfigPath) {
+        try { $previousClientId = [string](Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).client_id } catch {}
+    }
+    [ordered]@{
+        client_id = $clientId
+        port = $Port
+        redirect_uri = ""
+        scopes = @("rpc", "identify", "guilds", "rpc.voice.read", "rpc.voice.write")
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    ConvertTo-SecureString $clientSecret -AsPlainText -Force |
+        ConvertFrom-SecureString |
+        Set-Content -LiteralPath (Join-Path $Directory "client_secret.dpapi") -Encoding ASCII
+    if ($previousClientId -and $previousClientId -ne $clientId) {
+        Remove-Item -LiteralPath (Join-Path $Directory "oauth_token.dpapi") `
+            -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Initialize-VibepolloConfig {
+    param([string]$Directory, [string]$ConfigPath, [int]$Port)
+    if (-not $NonInteractiveConfiguration) {
+        & (Join-Path $Directory "Configure-VibepolloBridge.ps1")
+        return
+    }
+    $baseUrl = [string]$env:MOONWAKER_VIBEPOLLO_URL
+    $apiToken = [string]$env:MOONWAKER_VIBEPOLLO_TOKEN
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) { $baseUrl = "https://127.0.0.1:47990" }
+    $uri = $null
+    if (-not [uri]::TryCreate($baseUrl, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne "https" -or $uri.Host -notin @("127.0.0.1", "localhost") -or
+        [string]::IsNullOrWhiteSpace($apiToken)) {
+        throw "Vibepollo configuration is missing or invalid. Provide it in the MoonWaker installer."
+    }
+    [ordered]@{
+        base_url = $baseUrl.TrimEnd('/')
+        listen_port = $Port
+        python_path = ""
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    ConvertTo-SecureString $apiToken -AsPlainText -Force |
+        ConvertFrom-SecureString |
+        Set-Content -LiteralPath (Join-Path $Directory "api_token.dpapi") -Encoding ASCII
+}
+
 function Register-BridgeTask {
     param([string]$Name, [string]$StartScript)
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -112,8 +168,9 @@ if (-not $SkipDiscord) {
         "discord_bridge_config.example.json", "Start-DiscordBridge.ps1",
         "Stop-DiscordBridge.ps1", "Test-DiscordBridge.ps1", "WindowsAudio.cs", "README.md")
     $discordConfig = Join-Path $discordDirectory "discord_bridge_config.json"
-    if (-not (Test-Path -LiteralPath $discordConfig)) {
-        & (Join-Path $discordDirectory "Configure-DiscordBridge.ps1")
+    if (-not (Test-Path -LiteralPath $discordConfig) -or
+        ($NonInteractiveConfiguration -and -not [string]::IsNullOrWhiteSpace($env:MOONWAKER_DISCORD_CLIENT_ID))) {
+        Initialize-DiscordConfig $discordDirectory $discordConfig $DiscordPort
     }
     Set-ConfigPort $discordConfig "port" $DiscordPort
     Register-BridgeTask "Wake & Play Discord Bridge ($ProfileId)" `
@@ -128,8 +185,9 @@ if (-not $SkipVibepollo) {
         "Start-VibepolloBridge.ps1", "Stop-VibepolloBridge.ps1",
         "Test-VibepolloBridge.ps1", "README.md")
     $vibepolloConfig = Join-Path $vibepolloDirectory "config.json"
-    if (-not (Test-Path -LiteralPath $vibepolloConfig)) {
-        & (Join-Path $vibepolloDirectory "Configure-VibepolloBridge.ps1")
+    if (-not (Test-Path -LiteralPath $vibepolloConfig) -or
+        ($NonInteractiveConfiguration -and -not [string]::IsNullOrWhiteSpace($env:MOONWAKER_VIBEPOLLO_TOKEN))) {
+        Initialize-VibepolloConfig $vibepolloDirectory $vibepolloConfig $VibepolloPort
     }
     Set-ConfigPort $vibepolloConfig "listen_port" $VibepolloPort
     Register-BridgeTask "Wake & Play Vibepollo Bridge ($ProfileId)" `
@@ -193,5 +251,9 @@ if (-not $SkipStart) {
     if ($vibepolloDirectory) { & (Join-Path $vibepolloDirectory "Start-VibepolloBridge.ps1") }
     if ($playniteDirectory) { & (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1") }
 }
+
+# Never leak installer-provided secrets into Bridge child processes.
+$env:MOONWAKER_DISCORD_CLIENT_SECRET = $null
+$env:MOONWAKER_VIBEPOLLO_TOKEN = $null
 
 Write-Host "Wake & Play integration profile '$ProfileId' installed for $env:USERNAME." -ForegroundColor Green

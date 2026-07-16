@@ -20,6 +20,32 @@ use distinct loopback ports.
 
 ## Install
 
+### Graphical installer
+
+Build the self-contained Windows installer with the .NET Framework compiler
+included in Windows:
+
+```powershell
+.\host-services\installer\Build-MoonWakerHostInstaller.ps1
+```
+
+The generated `MoonWakerHostInstaller.exe` embeds the versioned Gateway,
+Bridge and profile installers. Its wizard installs or upgrades the machine
+Gateway, creates a profile for the active Windows user, detects Playnite and
+configures all selected Bridge instances. Existing certificates, paired TV
+clients, per-profile tokens and Bridge configuration are preserved.
+
+Discord uses one Developer Application per computer installation, not one per
+Windows profile. Its Client ID and Client Secret are entered only on the first
+installation and protected in the machine host configuration. Every Windows
+profile still stores and refreshes its own Discord OAuth token.
+
+The installer deliberately stages services for the next Windows restart. This
+avoids replacing a Gateway or Playnite Connector while either is serving an
+active stream.
+
+### Scripted installation
+
 From an elevated PowerShell prompt, install the machine-level package:
 
 ```powershell
