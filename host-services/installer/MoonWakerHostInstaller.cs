@@ -327,8 +327,10 @@ namespace MoonWaker.HostInstaller
                 info.CreateNoWindow = true;
                 info.RedirectStandardOutput = true;
                 info.RedirectStandardError = true;
-                info.StandardOutputEncoding = Encoding.UTF8;
-                info.StandardErrorEncoding = Encoding.UTF8;
+                // Windows PowerShell 5.1 writes redirected localized output in
+                // the active Windows code page, not UTF-8.
+                info.StandardOutputEncoding = Encoding.Default;
+                info.StandardErrorEncoding = Encoding.Default;
                 info.Arguments = "-NoProfile -ExecutionPolicy Bypass -File " + Quote(script) +
                     " -ProfileId " + Quote(profileId.Text.Trim()) + " -ProfileName " + Quote(profileName.Text.Trim()) +
                     (discord.Checked ? "" : " -SkipDiscord") + (vibepollo.Checked ? "" : " -SkipVibepollo") +
