@@ -52,8 +52,11 @@ namespace MoonWaker.HostInstaller
         public InstallerForm()
         {
             Text = "MoonWaker Host Installer";
-            ClientSize = new Size(760, 770);
-            MinimumSize = new Size(760, 770);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            ClientSize = new Size(920, 770);
+            MinimumSize = new Size(920, 770);
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = background;
             ForeColor = Color.White;
@@ -61,27 +64,27 @@ namespace MoonWaker.HostInstaller
 
             Label title = MakeLabel("MOONWAKER", 25F, FontStyle.Bold);
             title.ForeColor = Color.White;
-            title.SetBounds(38, 24, 400, 46);
+            title.SetBounds(38, 24, 520, 46);
             Controls.Add(title);
 
             step.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
             step.ForeColor = Color.FromArgb(170, 176, 197);
             step.TextAlign = ContentAlignment.MiddleRight;
-            step.SetBounds(520, 34, 195, 28);
+            step.SetBounds(690, 34, 190, 28);
             Controls.Add(step);
 
-            content.SetBounds(38, 88, 684, 595);
+            content.SetBounds(38, 88, 844, 595);
             content.BackColor = panelColor;
             Controls.Add(content);
 
             StyleButton(back, false);
             back.Text = "Wstecz";
-            back.SetBounds(438, 704, 130, 42);
+            back.SetBounds(598, 704, 130, 42);
             back.Click += delegate { if (page > 0) { page--; ShowPage(); } };
             Controls.Add(back);
 
             StyleButton(next, true);
-            next.SetBounds(582, 704, 140, 42);
+            next.SetBounds(742, 704, 140, 42);
             next.Click += NextClicked;
             Controls.Add(next);
 
@@ -119,7 +122,7 @@ namespace MoonWaker.HostInstaller
             AddField("Nazwa wyświetlana", profileName, 245, "Ta nazwa pojawi się w ustawieniach hosta MoonWaker.");
             Label note = MakeLabel("Instalator działa dla aktualnie zalogowanego konta: " + Environment.UserDomainName + "\\" + Environment.UserName, 9F, FontStyle.Regular);
             note.ForeColor = Color.FromArgb(170, 176, 197);
-            note.SetBounds(34, 375, 610, 32);
+            note.SetBounds(34, 375, 770, 32);
             content.Controls.Add(note);
         }
 
@@ -130,41 +133,41 @@ namespace MoonWaker.HostInstaller
             AddHeading("Integracje", "Dane aplikacji Discord podajesz tylko raz na cały komputer.");
 
             ConfigureCheckBox(discord, "Discord + VirtualHere", 30, 104);
-            ConfigureTextBox(discordId, 230, 98, 185, false);
-            ConfigureTextBox(discordSecret, 430, 98, 215, true);
-            AddSmallLabel("Application ID / Client ID", 230, 80, 185);
-            AddSmallLabel("OAuth2 Client Secret", 430, 80, 215);
+            ConfigureTextBox(discordId, 240, 98, 250, false);
+            ConfigureTextBox(discordSecret, 510, 98, 285, true);
+            AddSmallLabel("Application ID / Client ID", 240, 80, 250);
+            AddSmallLabel("OAuth2 Client Secret", 510, 80, 285);
             LinkLabel discordHelp = new LinkLabel();
             discordHelp.Text = "Utwórz aplikację w Discord Developer Portal i skopiuj pola z General Information oraz OAuth2.";
             discordHelp.LinkColor = Color.FromArgb(155, 145, 255);
             discordHelp.ActiveLinkColor = Color.White;
             discordHelp.BackColor = panelColor;
-            discordHelp.SetBounds(230, 137, 415, 32);
+            discordHelp.SetBounds(240, 137, 555, 38);
             discordHelp.LinkClicked += delegate { Process.Start("https://discord.com/developers/applications"); };
             content.Controls.Add(discordHelp);
             Label discordScopes = MakeLabel("Scope’y: rpc, identify, guilds, rpc.voice.read, rpc.voice.write", 8.5F, FontStyle.Regular);
             discordScopes.ForeColor = Color.FromArgb(155, 161, 180);
-            discordScopes.SetBounds(230, 165, 415, 22);
+            discordScopes.SetBounds(240, 176, 555, 22);
             content.Controls.Add(discordScopes);
 
-            ConfigureCheckBox(vibepollo, "Vibepollo", 30, 218);
-            ConfigureTextBox(vibepolloUrl, 230, 212, 185, false);
-            ConfigureTextBox(vibepolloToken, 430, 212, 215, true);
-            AddSmallLabel("Adres lokalnego API", 230, 194, 185);
-            AddSmallLabel("Istniejący token (opcjonalnie)", 430, 194, 215);
+            ConfigureCheckBox(vibepollo, "Vibepollo", 30, 236);
+            ConfigureTextBox(vibepolloUrl, 240, 230, 250, false);
+            ConfigureTextBox(vibepolloToken, 510, 230, 285, true);
+            AddSmallLabel("Adres lokalnego API", 240, 212, 250);
+            AddSmallLabel("Istniejący token (opcjonalnie)", 510, 212, 285);
 
-            ConfigureCheckBox(createVibepolloToken, "Utwórz token automatycznie", 230, 255);
-            ConfigureTextBox(vibepolloAdmin, 230, 302, 185, false);
-            ConfigureTextBox(vibepolloPassword, 430, 302, 215, true);
-            AddSmallLabel("Login administratora Vibepollo", 230, 284, 185);
-            AddSmallLabel("Hasło — nie zostanie zapisane", 430, 284, 215);
+            ConfigureCheckBox(createVibepolloToken, "Utwórz token automatycznie", 240, 272);
+            ConfigureTextBox(vibepolloAdmin, 240, 320, 250, false);
+            ConfigureTextBox(vibepolloPassword, 510, 320, 285, true);
+            AddSmallLabel("Login administratora Vibepollo", 240, 302, 250);
+            AddSmallLabel("Hasło — nie zostanie zapisane", 510, 302, 285);
             vibepolloAdmin.Enabled = createVibepolloToken.Checked;
             vibepolloPassword.Enabled = createVibepolloToken.Checked;
             vibepolloToken.Enabled = !createVibepolloToken.Checked;
             Button showScopes = new Button();
             StyleButton(showScopes, false);
             showScopes.Text = "Pokaż 19 wymaganych uprawnień";
-            showScopes.SetBounds(230, 346, 250, 32);
+            showScopes.SetBounds(240, 364, 290, 32);
             showScopes.Click += delegate
             {
                 MessageBox.Show(this,
@@ -173,13 +176,13 @@ namespace MoonWaker.HostInstaller
             };
             content.Controls.Add(showScopes);
 
-            ConfigureCheckBox(playnite, "Playnite", 30, 432);
-            ConfigureTextBox(playnitePath, 230, 426, 350, false);
-            AddSmallLabel("Katalog Playnite", 230, 408, 350);
+            ConfigureCheckBox(playnite, "Playnite", 30, 450);
+            ConfigureTextBox(playnitePath, 240, 444, 485, false);
+            AddSmallLabel("Katalog Playnite", 240, 426, 485);
             Button browse = new Button();
             StyleButton(browse, false);
             browse.Text = "…";
-            browse.SetBounds(590, 426, 55, 34);
+            browse.SetBounds(740, 444, 55, 34);
             browse.Click += delegate
             {
                 using (FolderBrowserDialog dialog = new FolderBrowserDialog())
@@ -192,7 +195,7 @@ namespace MoonWaker.HostInstaller
 
             Label security = MakeLabel("Tokeny są chronione przez DPAPI. Hasło administratora Vibepollo służy tylko do żądania i nie jest zapisywane.", 9F, FontStyle.Regular);
             security.ForeColor = Color.FromArgb(160, 200, 180);
-            security.SetBounds(30, 510, 620, 45);
+            security.SetBounds(30, 525, 765, 45);
             content.Controls.Add(security);
         }
 
@@ -204,14 +207,14 @@ namespace MoonWaker.HostInstaller
             AddHeading("Instalacja", "Konfiguruję Gateway, Bridge'e i profil MoonWaker.");
             progress.Style = ProgressBarStyle.Marquee;
             progress.MarqueeAnimationSpeed = 28;
-            progress.SetBounds(30, 102, 624, 8);
+            progress.SetBounds(30, 102, 784, 8);
             content.Controls.Add(progress);
             log.BackColor = Color.FromArgb(20, 24, 33);
             log.ForeColor = Color.FromArgb(205, 210, 225);
             log.BorderStyle = BorderStyle.None;
             log.ReadOnly = true;
             log.Font = new Font("Consolas", 9F);
-            log.SetBounds(30, 135, 624, 295);
+            log.SetBounds(30, 135, 784, 400);
             content.Controls.Add(log);
         }
 
@@ -353,11 +356,11 @@ namespace MoonWaker.HostInstaller
         private void AddHeading(string heading, string subtitle)
         {
             Label h = MakeLabel(heading, 20F, FontStyle.Bold);
-            h.SetBounds(30, 24, 620, 38);
+            h.SetBounds(30, 24, 780, 38);
             content.Controls.Add(h);
             Label s = MakeLabel(subtitle, 9.5F, FontStyle.Regular);
             s.ForeColor = Color.FromArgb(170, 176, 197);
-            s.SetBounds(31, 64, 620, 30);
+            s.SetBounds(31, 64, 780, 30);
             content.Controls.Add(s);
         }
 
@@ -366,10 +369,10 @@ namespace MoonWaker.HostInstaller
             Label l = MakeLabel(label, 9F, FontStyle.Bold);
             l.SetBounds(34, top, 250, 24);
             content.Controls.Add(l);
-            ConfigureTextBox(box, 34, top + 27, 610, false);
+            ConfigureTextBox(box, 34, top + 27, 770, false);
             Label h = MakeLabel(hint, 8.5F, FontStyle.Regular);
             h.ForeColor = Color.FromArgb(145, 151, 171);
-            h.SetBounds(34, top + 65, 610, 23);
+            h.SetBounds(34, top + 65, 770, 23);
             content.Controls.Add(h);
         }
 
