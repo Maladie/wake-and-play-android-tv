@@ -364,6 +364,23 @@ class BridgeState:
                         continue
                     normalized = dict(game)
                     normalized["id"] = game_id
+                    by_name = {str(key).casefold(): value for key, value in game.items()}
+                    last_played = (by_name.get("lastplayed") or
+                                   by_name.get("last_activity") or
+                                   by_name.get("lastactivity") or "")
+                    if last_played:
+                        normalized["lastPlayed"] = str(last_played)
+                    try:
+                        if "playtimeminutes" in by_name:
+                            playtime_minutes = int(by_name["playtimeminutes"] or 0)
+                        elif "playtime_minutes" in by_name:
+                            playtime_minutes = int(by_name["playtime_minutes"] or 0)
+                        else:
+                            # Playnite's Game.Playtime value is expressed in seconds.
+                            playtime_minutes = int(by_name.get("playtime") or 0) // 60
+                        normalized["playtimeMinutes"] = max(0, playtime_minutes)
+                    except (TypeError, ValueError):
+                        normalized["playtimeMinutes"] = 0
                     self.library_staging[game_id] = normalized
                 self.library = dict(self.library_staging)
                 self._publish_locked("library-updated", {"count": len(self.library)})

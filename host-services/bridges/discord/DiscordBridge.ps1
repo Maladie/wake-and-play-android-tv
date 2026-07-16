@@ -292,6 +292,13 @@ function Connect-RpcPipe {
     param([Parameter(Mandatory)]$Config)
 
     Close-Rpc
+    $bridgeSession = (Get-Process -Id $PID).SessionId
+    $discordInSession = Get-Process -Name "Discord" -ErrorAction SilentlyContinue |
+        Where-Object { $_.SessionId -eq $bridgeSession } |
+        Select-Object -First 1
+    if ($null -eq $discordInSession) {
+        throw "Discord is not running in this Windows profile session. Start Discord from MoonWaker, then retry."
+    }
     $accessDenied = $false
 
     for ($i = 0; $i -le 9; $i++) {
@@ -613,10 +620,15 @@ function Get-RepairStatus {
     $rpcConnected = ($null -ne $script:RpcStream -and $script:RpcStream.IsConnected)
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    $bridgeSession = (Get-Process -Id $PID).SessionId
+    $discordInSession = Get-Process -Name "Discord" -ErrorAction SilentlyContinue |
+        Where-Object { $_.SessionId -eq $bridgeSession } |
+        Select-Object -First 1
     return [pscustomobject]@{
         bridge = $true
         bridge_elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        discord = ($null -ne (Get-Process -Name "Discord" -ErrorAction SilentlyContinue | Select-Object -First 1))
+        discord = ($null -ne $discordInSession)
+        bridge_session = $bridgeSession
         virtualhere = ($null -ne (Get-Process -Name "vhui64" -ErrorAction SilentlyContinue | Select-Object -First 1))
         rpc_connected = $rpcConnected
         rpc_authenticated = [bool]$script:RpcAuthenticated
@@ -925,7 +937,9 @@ function Start-DiscordClient {
 
 function Restart-DiscordClient {
     Write-BridgeLog "Repair: restart Discord client."
-    $processes = @(Get-Process -Name "Discord" -ErrorAction SilentlyContinue)
+    $bridgeSession = (Get-Process -Id $PID).SessionId
+    $processes = @(Get-Process -Name "Discord" -ErrorAction SilentlyContinue |
+        Where-Object { $_.SessionId -eq $bridgeSession })
     $discordExe = $null
     foreach ($process in $processes) {
         try {

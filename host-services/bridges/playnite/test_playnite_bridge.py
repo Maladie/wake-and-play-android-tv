@@ -62,7 +62,8 @@ class BridgeStateTest(unittest.TestCase):
             "payload": [
                 {"id": GAME_ID, "name": "Baba Is You", "installed": True},
                 {"id": "65705ca9-b9c7-4ada-b4b7-f73ffb8ac64f",
-                 "name": "Resident Evil 3", "installed": True},
+                 "name": "Resident Evil 3", "installed": True,
+                 "Playtime": 7500, "LastActivity": "2026-07-15T20:10:00Z"},
             ],
         })
 
@@ -70,6 +71,8 @@ class BridgeStateTest(unittest.TestCase):
         second = self.state.library_page(first["next_cursor"], 1)
         self.assertEqual("Baba Is You", first["games"][0]["name"])
         self.assertEqual("Resident Evil 3", second["games"][0]["name"])
+        self.assertEqual(125, second["games"][0]["playtimeMinutes"])
+        self.assertEqual("2026-07-15T20:10:00Z", second["games"][0]["lastPlayed"])
         self.assertEqual("", second["next_cursor"])
 
     def test_artwork_is_resolved_only_from_library_metadata(self):

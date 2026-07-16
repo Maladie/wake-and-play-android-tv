@@ -103,14 +103,16 @@ function Invoke-VibepolloApi {
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.StandardInput.Write((ConvertTo-JsonSafe $transportRequest 8))
         $process.StandardInput.Close()
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
         if (-not $process.WaitForExit(6000)) {
             try { $process.Kill() } catch {}
             throw "TLS transport timed out"
         }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
         if (-not $stdout) { throw "TLS transport returned no data. $stderr" }
         $response = $stdout | ConvertFrom-Json
         if (-not $response.ok) { throw "HTTP $($response.status): $($response.error)" }
@@ -543,8 +545,13 @@ function Invoke-Action {
             $startInfo.UseShellExecute = $false; $startInfo.CreateNoWindow = $true
             $startInfo.RedirectStandardInput = $true; $startInfo.RedirectStandardOutput = $true; $startInfo.RedirectStandardError = $true
             $process = [Diagnostics.Process]::new(); $process.StartInfo = $startInfo; [void]$process.Start()
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
             $process.StandardInput.Write((ConvertTo-JsonSafe $transportRequest 8)); $process.StandardInput.Close()
-            $stdout = $process.StandardOutput.ReadToEnd(); $stderr = $process.StandardError.ReadToEnd(); $process.WaitForExit()
+            if (-not $process.WaitForExit(20000)) {
+                try { $process.Kill() } catch {}
+                throw "Log export transport timed out"
+            }
+            $stdout = $stdoutTask.GetAwaiter().GetResult(); $stderr = $stderrTask.GetAwaiter().GetResult()
             if (-not $stdout) { throw "Log export transport failed: $stderr" }
             $transportResponse = $stdout | ConvertFrom-Json
             if (-not $transportResponse.ok) { throw "Log export failed: $($transportResponse.error)" }
