@@ -44,6 +44,7 @@ $script:RpcStream = $null
 $script:RpcPipeName = $null
 $script:RpcAuthenticated = $false
 $script:LastRpcError = ""
+$script:LastAutomaticRpcAttempt = [DateTime]::MinValue
 $script:Running = $true
 
 # DISCORD_BRIDGE_ADVANCED_V1
@@ -614,6 +615,27 @@ function Ensure-Rpc {
     }
 
     return $config
+}
+
+function Try-AutomaticRpcConnection {
+    $connected = $null -ne $script:RpcStream -and $script:RpcStream.IsConnected -and
+        $script:RpcAuthenticated
+    if ($connected -or ((Get-Date) - $script:LastAutomaticRpcAttempt).TotalSeconds -lt 10) {
+        return
+    }
+    $bridgeSession = (Get-Process -Id $PID).SessionId
+    $discord = Get-Process -Name "Discord" -ErrorAction SilentlyContinue |
+        Where-Object { $_.SessionId -eq $bridgeSession } | Select-Object -First 1
+    if ($null -eq $discord) { return }
+    $script:LastAutomaticRpcAttempt = Get-Date
+    try {
+        Ensure-Rpc | Out-Null
+        Write-BridgeLog "Automatic Discord RPC connection succeeded."
+    } catch {
+        $script:LastRpcError = $_.Exception.Message
+        Write-BridgeLog -Level "DEBUG" -Message (
+            "Automatic Discord RPC connection pending: $($_.Exception.Message)")
+    }
 }
 
 function Get-RepairStatus {
@@ -1490,6 +1512,7 @@ function Get-EndpointResponse {
 
     switch ($path) {
         "/health" {
+            Try-AutomaticRpcConnection
             $connected = (
                 $null -ne $script:RpcStream -and
                 $script:RpcStream.IsConnected

@@ -37,7 +37,7 @@ class StreamDisplayResolver:
     }
 
     def __init__(self, vibepollo_bridge: str) -> None:
-        self.endpoint = vibepollo_bridge.rstrip("/") + "/diagnostics/stream-sources" \
+        self.endpoint = vibepollo_bridge.rstrip("/") + "/stream-display" \
             if vibepollo_bridge else ""
         self.last_check = 0.0
         self.last_forced_check = 0.0

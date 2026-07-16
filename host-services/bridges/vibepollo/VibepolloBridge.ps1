@@ -475,6 +475,65 @@ function Get-StreamSourceDiagnostics {
     return $script:DiagnosticsCache
 }
 
+function Find-StreamDisplayName {
+    param($Value)
+    if ($null -eq $Value) { return "" }
+    $displayKeys = @("display", "display_name", "displayname", "monitor", "monitor_name",
+        "output", "output_name", "outputname", "output_name_override")
+    if ($Value -is [Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) {
+            $child = $Value[$key]
+            if ($displayKeys -contains ([string]$key).ToLowerInvariant()) {
+                $text = [string]$child
+                if ($text -match '^(?:\\\\\.\\)?DISPLAY[0-9]+$') {
+                    return $(if ($text.ToUpperInvariant().StartsWith("DISPLAY")) {
+                        "\\.\" + $text.ToUpperInvariant()
+                    } else { $text.ToUpperInvariant() })
+                }
+            }
+            $found = Find-StreamDisplayName $child
+            if ($found) { return $found }
+        }
+        return ""
+    }
+    if ($Value -is [Collections.IEnumerable] -and -not ($Value -is [string])) {
+        foreach ($child in $Value) {
+            $found = Find-StreamDisplayName $child
+            if ($found) { return $found }
+        }
+        return ""
+    }
+    foreach ($property in $Value.PSObject.Properties) {
+        if ($displayKeys -contains $property.Name.ToLowerInvariant()) {
+            $text = [string]$property.Value
+            if ($text -match '^(?:\\\\\.\\)?DISPLAY[0-9]+$') {
+                return $(if ($text.ToUpperInvariant().StartsWith("DISPLAY")) {
+                    "\\.\" + $text.ToUpperInvariant()
+                } else { $text.ToUpperInvariant() })
+            }
+        }
+        $found = Find-StreamDisplayName $property.Value
+        if ($found) { return $found }
+    }
+    return ""
+}
+
+function Get-ActiveStreamDisplay {
+    param([switch]$Force)
+    foreach ($source in @(
+        @{ key = "session"; path = "/api/session/status"; ttl = 2 },
+        @{ key = "rtsp"; path = "/api/rtsp/sessions"; ttl = 2 },
+        @{ key = "webrtc"; path = "/api/webrtc/sessions"; ttl = 3 },
+        @{ key = "activehistory"; path = "/api/history/sessions/active"; ttl = 2 })) {
+        $value = Get-CachedApi $source.key $source.path $source.ttl -Force:$Force
+        $display = Find-StreamDisplayName $value
+        if ($display) {
+            return [pscustomobject]@{ ok = $true; display_name = $display; source = $source.key }
+        }
+    }
+    return [pscustomobject]@{ ok = $true; display_name = ""; source = "" }
+}
+
 function Send-JsonResponse {
     param([IO.Stream]$Stream, $Value, [int]$StatusCode = 200)
     $safeValue = ConvertTo-RemoteJsonSafe $Value
@@ -625,6 +684,10 @@ try {
                 '^/diagnostics/stream-sources$' {
                     $force = [string]$request.Query["force"] -in @("1", "true", "yes")
                     Send-JsonResponse $request.Stream (Get-StreamSourceDiagnostics -Force:$force)
+                }
+                '^/stream-display$' {
+                    $force = [string]$request.Query["force"] -in @("1", "true", "yes")
+                    Send-JsonResponse $request.Stream (Get-ActiveStreamDisplay -Force:$force)
                 }
                 '^/apps$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ apps = (Get-Snapshot).apps }) }
                 '^/clients$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ clients = (Get-Snapshot).clients }) }
