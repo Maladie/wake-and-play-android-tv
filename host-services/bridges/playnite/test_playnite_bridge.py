@@ -127,6 +127,11 @@ class BridgeStateTest(unittest.TestCase):
         self.assertEqual(
             [r"\\.\DISPLAY15"], StreamDisplayResolver.displays_from_payload(payload))
 
+    def test_stream_display_falls_back_to_latest_sunshine_capture_log(self):
+        logs = Path(__file__).parent / "testdata"
+        resolver = StreamDisplayResolver("", str(logs))
+        self.assertEqual(r"\\.\DISPLAY15", resolver.resolve())
+
     def test_connector_patch_is_guarded_and_idempotent(self):
         fixture = "\n".join([
             READER_ANCHOR, STATUS_PARAM_ANCHOR, STATUS_OBJECT_ANCHOR,

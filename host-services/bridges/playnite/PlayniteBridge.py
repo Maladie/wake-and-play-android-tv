@@ -36,12 +36,35 @@ class StreamDisplayResolver:
         "output", "output_name", "outputname", "output_name_override",
     }
 
-    def __init__(self, vibepollo_bridge: str) -> None:
+    CAPTURE_LOG_PATTERN = re.compile(
+        r"display:\s*['\"](?P<display>(?:\\\\\.\\)?DISPLAY[0-9]+)['\"]",
+        re.IGNORECASE)
+
+    def __init__(self, vibepollo_bridge: str, sunshine_logs: str = "") -> None:
         self.endpoint = vibepollo_bridge.rstrip("/") + "/stream-display" \
             if vibepollo_bridge else ""
+        app_data = os.environ.get("APPDATA", "")
+        self.sunshine_logs = Path(sunshine_logs) if sunshine_logs else \
+            Path(app_data) / "Sunshine" / "logs" if app_data else None
         self.last_check = 0.0
         self.last_forced_check = 0.0
         self.cached = ""
+
+    def _resolve_from_capture_log(self) -> str:
+        """Use Sunshine's own active-capture record when Vibepollo omits output metadata."""
+        if not self.sunshine_logs or not self.sunshine_logs.is_dir():
+            return ""
+        try:
+            logs = sorted(self.sunshine_logs.glob("sunshine_wgc_helper-*.log"),
+                          key=lambda path: path.stat().st_mtime, reverse=True)
+            for path in logs[:5]:
+                text = path.read_text(encoding="utf-8-sig", errors="replace")[-64 * 1024:]
+                matches = list(self.CAPTURE_LOG_PATTERN.finditer(text))
+                if matches:
+                    return self._normalize(matches[-1].group("display"))
+        except OSError:
+            pass
+        return ""
 
     @staticmethod
     def _normalize(value: Any) -> str:
@@ -73,22 +96,25 @@ class StreamDisplayResolver:
 
     def resolve(self) -> str:
         now = time.monotonic()
-        if not self.endpoint or now - self.last_check < 1.0:
+        if now - self.last_check < 1.0:
             return self.cached
         self.last_check = now
-        try:
-            endpoint = self.endpoint
-            timeout = 1.0
-            if not self.cached and now - self.last_forced_check >= 5.0:
-                endpoint += "?force=1"
-                self.last_forced_check = now
-                timeout = 3.0
-            with urllib.request.urlopen(endpoint, timeout=timeout) as response:
-                payload = json.loads(response.read(256 * 1024).decode("utf-8-sig"))
-            displays = self.displays_from_payload(payload)
-            self.cached = displays[0] if len(displays) == 1 else ""
-        except Exception:
-            pass
+        if self.endpoint:
+            try:
+                endpoint = self.endpoint
+                timeout = 1.0
+                if not self.cached and now - self.last_forced_check >= 5.0:
+                    endpoint += "?force=1"
+                    self.last_forced_check = now
+                    timeout = 3.0
+                with urllib.request.urlopen(endpoint, timeout=timeout) as response:
+                    payload = json.loads(response.read(256 * 1024).decode("utf-8-sig"))
+                displays = self.displays_from_payload(payload)
+                self.cached = displays[0] if len(displays) == 1 else ""
+            except Exception:
+                pass
+        if not self.cached:
+            self.cached = self._resolve_from_capture_log()
         return self.cached
 
 
@@ -100,6 +126,8 @@ class WindowProbe:
     DWMWA_CLOAKED = 14
     WM_CLOSE = 0x0010
     SW_RESTORE = 9
+    SWP_NOZORDER = 0x0004
+    SWP_SHOWWINDOW = 0x0040
 
     def __init__(self) -> None:
         self.user32 = None
@@ -123,6 +151,11 @@ class WindowProbe:
             self.user32.ShowWindow.restype = wintypes.BOOL
             self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
             self.user32.SetForegroundWindow.restype = wintypes.BOOL
+            self.user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                                  ctypes.c_int, ctypes.c_int,
+                                                  ctypes.c_int, ctypes.c_int,
+                                                  wintypes.UINT]
+            self.user32.SetWindowPos.restype = wintypes.BOOL
             self.user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
             self.user32.MonitorFromWindow.restype = wintypes.HANDLE
             self.user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
@@ -228,6 +261,45 @@ class WindowProbe:
             return str(info.szDevice)
         return ""
 
+    def _display_bounds(self, expected_display: str) -> list[int]:
+        if not self.user32:
+            return []
+        result: list[int] = []
+        callback_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+        class MonitorInfoEx(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD),
+                        ("szDevice", wintypes.WCHAR * 32)]
+
+        def visit(monitor: int, _dc: int, _rect: Any, _data: int) -> bool:
+            info = MonitorInfoEx()
+            info.cbSize = ctypes.sizeof(info)
+            if self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)) and \
+                    str(info.szDevice).casefold() == expected_display.casefold():
+                result.extend([info.rcMonitor.left, info.rcMonitor.top,
+                               info.rcMonitor.right, info.rcMonitor.bottom])
+                return False
+            return True
+
+        self.user32.EnumDisplayMonitors(0, None, callback_type(visit), 0)
+        return result
+
+    def _move_to_display(self, hwnd: int, expected_display: str) -> bool:
+        bounds = self._display_bounds(expected_display)
+        if len(bounds) != 4:
+            return False
+        left, top, right, bottom = bounds
+        self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+        moved = bool(self.user32.SetWindowPos(
+            hwnd, 0, left, top, right - left, bottom - top,
+            self.SWP_NOZORDER | self.SWP_SHOWWINDOW))
+        if moved:
+            self.user32.SetForegroundWindow(hwnd)
+        return moved
+
     def sample(self, target_kind: str, process_id: int,
                expected_display: str) -> dict[str, Any]:
         if not self.user32:
@@ -274,8 +346,10 @@ class WindowProbe:
             return {"qualified": False, "reason": reason}
         candidate = next((item for item in windows if item["foreground"]), windows[0])
         if not candidate["foreground"]:
+            self.user32.SetForegroundWindow(candidate["hwnd"])
             return {"qualified": False, "reason": "target_not_foreground", **candidate}
         if candidate["display"].casefold() != expected_display.casefold():
+            self._move_to_display(candidate["hwnd"], expected_display)
             return {"qualified": False, "reason": "target_on_wrong_display", **candidate}
         return {"qualified": True, "reason": "stabilizing_target_window", **candidate}
 
@@ -843,7 +917,9 @@ def main() -> None:
     state = BridgeState(expected_display)
     window_probe = WindowProbe()
     fullscreen_path = str(config.get("playnite_fullscreen_executable", "")).strip()
-    display_resolver = StreamDisplayResolver(str(config.get("vibepollo_bridge", "")).strip())
+    display_resolver = StreamDisplayResolver(
+        str(config.get("vibepollo_bridge", "")).strip(),
+        str(config.get("sunshine_logs", "")).strip())
     state.set_window_actions(
         window_probe.request_graceful_close,
         lambda: window_probe.show_playnite_fullscreen(fullscreen_path))
