@@ -78,10 +78,12 @@ class StreamDisplayResolver:
         self.last_check = now
         try:
             endpoint = self.endpoint
+            timeout = 1.0
             if not self.cached and now - self.last_forced_check >= 5.0:
                 endpoint += "?force=1"
                 self.last_forced_check = now
-            with urllib.request.urlopen(endpoint, timeout=0.75) as response:
+                timeout = 3.0
+            with urllib.request.urlopen(endpoint, timeout=timeout) as response:
                 payload = json.loads(response.read(256 * 1024).decode("utf-8-sig"))
             displays = self.displays_from_payload(payload)
             self.cached = displays[0] if len(displays) == 1 else ""
