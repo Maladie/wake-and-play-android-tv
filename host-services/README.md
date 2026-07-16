@@ -11,12 +11,32 @@ This directory is the canonical source for the Windows side of Wake & Play:
 - `bridges/playnite/` reuses the Playnite connector's launcher pipe for library,
   lifecycle and privacy-readiness coordination in the interactive profile.
 - `install/` contains the machine-level and per-profile installers.
+- `profile-agent/` owns the lifecycle of all interactive Bridges for one
+  Windows profile and prevents detached per-component autostarts.
+- `control/` contains the native MoonWaker Host Control application.
 - `tests/` prevents runtime secrets and state from entering the repository.
 
 The Gateway is installed once per physical streaming host. Bridge instances
 are installed per Windows integration profile because Discord RPC and DPAPI
 credentials are session/user-bound. Every concurrently installed profile must
 use distinct loopback ports.
+
+## MoonWaker Host Control
+
+The graphical installer adds **MoonWaker Host Control** to the Start menu of
+every configured Windows user. It provides explicit start, stop, restart and
+pairing controls for the single machine Gateway. It also lists configured
+profiles, the profile most recently selected by the TV, and the health of
+Discord, Vibepollo and Playnite.
+
+Each Windows profile has one logical Profile Bridge supervisor. Starting or
+stopping it starts or stops all enabled Bridge components together. The
+supervisor adopts a compatible Bridge already listening during migration and
+restarts a component that exits unexpectedly. Removing a profile from Host
+Control stops its supervisor, removes its logon registration, unregisters it
+from Gateway and deletes its per-user DPAPI credentials. Discord OAuth data can
+also be cleared independently without deleting the machine-wide Discord
+Developer Application credentials.
 
 ## Install
 
@@ -76,8 +96,9 @@ C:\Tools\WakePlayHost\install\Install-WakePlayProfile.ps1 `
 
 The profile installer copies clean Bridge sources into the current user's
 `LocalAppData`, runs interactive credential configuration when necessary,
-registers per-user logon tasks and adds the loopback endpoints to the Gateway
-profile registry. Restart the Gateway after changing the registry.
+registers one Profile Bridge supervisor at user logon and adds the loopback
+endpoints to the Gateway profile registry. Legacy per-component autostarts are
+removed during migration. Restart the Gateway after changing the registry.
 
 Older single-profile installations that already use the flat `C:\Tools`
 layout can add only the Playnite component without replacing credentials:

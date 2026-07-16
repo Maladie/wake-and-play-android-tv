@@ -13,10 +13,12 @@ $archive = Join-Path $staging "payload.zip"
 
 try {
     New-Item -ItemType Directory -Path $payloadRoot, $OutputDirectory -Force | Out-Null
-    foreach ($directory in @("gateway", "bridges", "install")) {
+    foreach ($directory in @("gateway", "bridges", "profile-agent", "control", "install")) {
         Copy-Item -LiteralPath (Join-Path $hostServices $directory) `
             -Destination $payloadRoot -Recurse -Force
     }
+    & (Join-Path $hostServices "control\Build-MoonWakerHostControl.ps1") `
+        -OutputDirectory (Join-Path $payloadRoot "control") | Out-Null
     Compress-Archive -Path (Join-Path $staging "payload\host-services") `
         -DestinationPath $archive -CompressionLevel Optimal
 

@@ -67,6 +67,9 @@ class GatewayState:
         self.idempotent_results: dict[str, tuple[float, int, Any]] = {}
         self.lock = threading.RLock()
         self.request_context = threading.local()
+        self.runtime_status_path = self.config_path.with_name("runtime-status.json")
+        self.last_runtime_profile = ""
+        self.last_runtime_write = 0.0
 
     @property
     def base_dir(self) -> Path:
@@ -141,7 +144,7 @@ class GatewayState:
             self.save()
         return {"client_id": client_id, "token": token}
 
-    def select_profile(self, profile_id: str | None) -> str:
+    def select_profile(self, profile_id: str | None, record_use: bool = False) -> str:
         selected = str(profile_id or "default").strip() or "default"
         if not PROFILE_ID_PATTERN.fullmatch(selected):
             raise ValueError("Invalid integration profile ID.")
@@ -149,7 +152,23 @@ class GatewayState:
         if selected not in profiles:
             raise ValueError(f"Unknown integration profile: {selected}")
         self.request_context.profile_id = selected
+        if record_use:
+            self.record_profile_use(selected)
         return selected
+
+    def record_profile_use(self, profile_id: str) -> None:
+        now = time.monotonic()
+        with self.lock:
+            if profile_id == self.last_runtime_profile and now - self.last_runtime_write < 5.0:
+                return
+            temporary = self.runtime_status_path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps({
+                "profile_id": profile_id,
+                "updated_at": int(time.time()),
+            }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, self.runtime_status_path)
+            self.last_runtime_profile = profile_id
+            self.last_runtime_write = now
 
     @property
     def profile_id(self) -> str:
@@ -745,7 +764,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         return False
 
     def select_profile(self) -> str:
-        return self.state.select_profile(self.headers.get("X-WakePlay-Profile", "default"))
+        return self.state.select_profile(
+            self.headers.get("X-WakePlay-Profile", "default"), record_use=True)
 
     def do_GET(self) -> None:  # noqa: N802
         try:

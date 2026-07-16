@@ -238,6 +238,21 @@ if (-not (Test-Path -LiteralPath $hostInstaller) -or -not (Test-Path -LiteralPat
     throw "The embedded MoonWaker host package is incomplete."
 }
 
+$controlSource = Join-Path $packageRoot "control"
+$controlTarget = Join-Path $env:LOCALAPPDATA "WakePlayHost\control"
+if (Test-Path -LiteralPath (Join-Path $controlSource "MoonWakerHostControl.exe")) {
+    New-Item -ItemType Directory -Path $controlTarget -Force | Out-Null
+    Copy-Item -Path (Join-Path $controlSource "*") -Destination $controlTarget -Recurse -Force
+    $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\MoonWaker"
+    New-Item -ItemType Directory -Path $startMenu -Force | Out-Null
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut((Join-Path $startMenu "MoonWaker Host Control.lnk"))
+    $shortcut.TargetPath = Join-Path $controlTarget "MoonWakerHostControl.exe"
+    $shortcut.WorkingDirectory = $controlTarget
+    $shortcut.Description = "Sterowanie Gatewayem i profilami MoonWaker"
+    $shortcut.Save()
+}
+
 $hostRoot = "C:\Tools\WakePlayHost"
 $canonicalGateway = Join-Path $hostRoot "gateway"
 $legacyGateway = "C:\Tools\WakePlayGateway"

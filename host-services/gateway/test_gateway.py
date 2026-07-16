@@ -19,6 +19,7 @@ class GatewayStateTest(unittest.TestCase):
     def tearDown(self):
         self.config_path.unlink(missing_ok=True)
         self.config_path.with_name("pairing-code.json").unlink(missing_ok=True)
+        self.config_path.with_name("runtime-status.json").unlink(missing_ok=True)
 
     def test_pair_stores_only_token_hash(self):
         state = GatewayState(self.config_path, "123456")
@@ -84,6 +85,20 @@ class GatewayStateTest(unittest.TestCase):
             state.bridge_url("playnite", "/library/list"),
         )
         self.assertEqual("basia", state.capabilities()["gateway"]["integration_profile_id"])
+
+    def test_authenticated_profile_use_is_persisted_for_host_control(self):
+        state = GatewayState(self.config_path, None)
+        state.config["profiles"]["basia"] = {
+            "discord_bridge": "http://127.0.0.1:8865",
+            "vibepollo_bridge": "http://127.0.0.1:8875",
+            "playnite_bridge": "http://127.0.0.1:8880",
+        }
+
+        state.select_profile("basia", record_use=True)
+
+        runtime = json.loads(state.runtime_status_path.read_text(encoding="utf-8"))
+        self.assertEqual("basia", runtime["profile_id"])
+        self.assertGreater(runtime["updated_at"], 0)
 
     def test_unknown_or_invalid_profile_is_rejected(self):
         state = GatewayState(self.config_path, None)

@@ -58,6 +58,13 @@ if (-not (Test-Path -LiteralPath $sourceRoot)) {
 
 $profileRoot = Join-Path $InstallRoot $ProfileId
 New-Item -ItemType Directory -Path $profileRoot -Force | Out-Null
+$agentSource = Join-Path $hostServicesRoot "profile-agent"
+if (-not (Test-Path -LiteralPath $agentSource)) {
+    $agentSource = Join-Path (Split-Path -Parent $PSScriptRoot) "profile-agent-source"
+}
+if (-not (Test-Path -LiteralPath $agentSource)) {
+    throw "Profile Bridge supervisor package was not found next to the installer."
+}
 
 function Install-BridgeFiles {
     param([string]$Name, [string[]]$Files)
@@ -159,8 +166,25 @@ function Initialize-VibepolloConfig {
         Set-Content -LiteralPath (Join-Path $Directory "api_token.dpapi") -Encoding ASCII
 }
 
-function Register-BridgeTask {
-    param([string]$Name, [string]$StartScript)
+function Remove-LegacyBridgeStartup {
+    foreach ($name in @("Wake & Play Discord Bridge ($ProfileId)",
+        "Wake & Play Vibepollo Bridge ($ProfileId)", "Wake & Play Playnite Bridge ($ProfileId)")) {
+        try { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    }
+    $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    try {
+        $item = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+        foreach ($property in $item.PSObject.Properties) {
+            if ($property.Name -like "MoonWaker*Bridge*$ProfileId*") {
+                Remove-ItemProperty -Path $runKey -Name $property.Name -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+}
+
+function Register-ProfileAgent {
+    param([string]$StartScript)
+    $Name = "MoonWaker Profile Bridge ($ProfileId)"
     # Updating an existing machine Task Scheduler entry requires elevation even
     # when it belongs to the current interactive user. Its command already
     # points at this stable per-profile path, so keep it instead of failing an
@@ -168,7 +192,7 @@ function Register-BridgeTask {
     try {
         $existingTask = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
         if ($null -ne $existingTask) {
-            Write-Host "Keeping existing Bridge startup task '$Name'."
+            Write-Host "Keeping existing Profile Bridge startup task '$Name'."
             return
         }
     } catch {}
@@ -183,11 +207,11 @@ function Register-BridgeTask {
         # folder on every Windows configuration. HKCU Run provides the same
         # per-profile logon behavior without crossing the user boundary.
         $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        $runName = "MoonWaker " + ($Name -replace '[^A-Za-z0-9._ -]', '_')
+        $runName = "MoonWaker Profile Bridge ($ProfileId)"
         $command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
         New-Item -Path $runKey -Force | Out-Null
         Set-ItemProperty -Path $runKey -Name $runName -Value $command
-        Write-Host "Registered per-user Bridge startup '$runName'."
+        Write-Host "Registered per-user Profile Bridge startup '$runName'."
         return
     }
 
@@ -202,6 +226,13 @@ function Register-BridgeTask {
         -Settings $settings -Principal $taskPrincipal -Force | Out-Null
 }
 
+Remove-LegacyBridgeStartup
+foreach ($file in @("MoonWakerProfileBridge.ps1", "Start-MoonWakerProfileBridge.ps1",
+    "Stop-MoonWakerProfileBridge.ps1")) {
+    Copy-Item -LiteralPath (Join-Path $agentSource $file) -Destination (Join-Path $profileRoot $file) -Force
+}
+Register-ProfileAgent (Join-Path $profileRoot "Start-MoonWakerProfileBridge.ps1")
+
 $discordDirectory = $null
 if (-not $SkipDiscord) {
     Stop-InstalledBridge "discord" "Stop-DiscordBridge.ps1"
@@ -215,8 +246,6 @@ if (-not $SkipDiscord) {
         Initialize-DiscordConfig $discordDirectory $discordConfig $DiscordPort
     }
     Set-ConfigPort $discordConfig "port" $DiscordPort
-    Register-BridgeTask "Wake & Play Discord Bridge ($ProfileId)" `
-        (Join-Path $discordDirectory "Start-DiscordBridge.ps1")
 }
 
 $vibepolloDirectory = $null
@@ -234,8 +263,6 @@ if (-not $SkipVibepollo) {
         Initialize-VibepolloConfig $vibepolloDirectory $vibepolloConfig $VibepolloPort
     }
     Set-ConfigPort $vibepolloConfig "listen_port" $VibepolloPort
-    Register-BridgeTask "Wake & Play Vibepollo Bridge ($ProfileId)" `
-        (Join-Path $vibepolloDirectory "VibepolloBridge.ps1")
 }
 
 $playniteDirectory = $null
@@ -253,8 +280,6 @@ if (-not $SkipPlaynite) {
     Set-ConfigPort $playniteConfig "listen_port" $PlaynitePort
     Set-ConfigValue $playniteConfig "vibepollo_bridge" `
         $(if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" })
-    Register-BridgeTask "Wake & Play Playnite Bridge ($ProfileId)" `
-        (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1")
 }
 
 if (-not $SkipGatewayRegistration) {
@@ -265,6 +290,8 @@ if (-not $SkipGatewayRegistration) {
         }
         $entry = [pscustomobject]@{
             name = $profileDisplayName
+            owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            profile_root = $profileRoot
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
             playnite_bridge = if ($SkipPlaynite) { "" } else { "http://127.0.0.1:$PlaynitePort" }
@@ -282,6 +309,8 @@ if (-not $SkipGatewayRegistration) {
         [ordered]@{
             profile_id = $ProfileId
             name = $profileDisplayName
+            owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            profile_root = $profileRoot
             discord_bridge = if ($SkipDiscord) { "" } else { "http://127.0.0.1:$DiscordPort" }
             vibepollo_bridge = if ($SkipVibepollo) { "" } else { "http://127.0.0.1:$VibepolloPort" }
             playnite_bridge = if ($SkipPlaynite) { "" } else { "http://127.0.0.1:$PlaynitePort" }
@@ -292,9 +321,7 @@ if (-not $SkipGatewayRegistration) {
 }
 
 if (-not $SkipStart) {
-    if ($discordDirectory) { & (Join-Path $discordDirectory "Start-DiscordBridge.ps1") }
-    if ($vibepolloDirectory) { & (Join-Path $vibepolloDirectory "Start-VibepolloBridge.ps1") }
-    if ($playniteDirectory) { & (Join-Path $playniteDirectory "Start-PlayniteBridge.ps1") }
+    & (Join-Path $profileRoot "Start-MoonWakerProfileBridge.ps1") -ProfileRoot $profileRoot -ProfileId $ProfileId
 }
 
 # Never leak installer-provided secrets into Bridge child processes.
