@@ -218,10 +218,8 @@ function New-MoonWakerVibepolloToken {
 }
 
 Assert-AdministratorAndInteractiveUser
-foreach ($command in @("python.exe", "openssl.exe")) {
-    if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
-        throw "$command is required but was not found in PATH."
-    }
+if (-not (Get-Command "python.exe" -ErrorAction SilentlyContinue)) {
+    throw "python.exe is required but was not found in PATH."
 }
 
 $packageRoot = Split-Path -Parent $PSScriptRoot
@@ -239,6 +237,13 @@ $gatewayDirectory = if ((Test-Path -LiteralPath (Join-Path $legacyGateway "gatew
     $legacyGateway
 } else { $canonicalGateway }
 $gatewayConfig = Join-Path $gatewayDirectory "gateway.json"
+$gatewayCertificate = Join-Path $gatewayDirectory "gateway-cert.pem"
+$gatewayPrivateKey = Join-Path $gatewayDirectory "gateway-key.pem"
+if ((-not (Test-Path -LiteralPath $gatewayCertificate) -or
+    -not (Test-Path -LiteralPath $gatewayPrivateKey)) -and
+    -not (Get-Command "openssl.exe" -ErrorAction SilentlyContinue)) {
+    throw "openssl.exe is required only to create the first Gateway certificate, but was not found in PATH."
+}
 $ports = Resolve-ProfilePorts $gatewayConfig
 $profileRoot = Join-Path $env:LOCALAPPDATA "WakePlayHost\profiles\$ProfileId"
 if (-not $SkipDiscord) {
