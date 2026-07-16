@@ -137,6 +137,18 @@ namespace MoonWaker.HostInstaller
             ConfigureTextBox(discordSecret, 510, 120, 285, true);
             AddSmallLabel("Application ID / Client ID", 240, 100, 250);
             AddSmallLabel("OAuth2 Client Secret", 510, 100, 285);
+            bool machineDiscordConfigured = HasMachineDiscordApplication();
+            discordId.Enabled = !machineDiscordConfigured;
+            discordSecret.Enabled = !machineDiscordConfigured;
+            if (machineDiscordConfigured)
+            {
+                discordId.Clear();
+                discordSecret.Clear();
+                Label configured = MakeLabel("✓ Dane aplikacji zapisane na tym komputerze", 8.5F, FontStyle.Regular);
+                configured.ForeColor = Color.FromArgb(145, 215, 175);
+                configured.SetBounds(30, 162, 195, 45);
+                content.Controls.Add(configured);
+            }
             LinkLabel discordHelp = new LinkLabel();
             discordHelp.Text = "Utwórz aplikację w Discord Developer Portal i skopiuj pola z General Information oraz OAuth2.";
             discordHelp.LinkColor = Color.FromArgb(155, 145, 255);
@@ -448,6 +460,15 @@ namespace MoonWaker.HostInstaller
             foreach (string candidate in candidates)
                 if (File.Exists(Path.Combine(candidate, "Playnite.FullscreenApp.exe"))) return candidate;
             return "";
+        }
+
+        private static bool HasMachineDiscordApplication()
+        {
+            string root = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "MoonWakerHost");
+            return File.Exists(Path.Combine(root, "discord-app.json")) &&
+                File.Exists(Path.Combine(root, "discord-app-secret.dpapi"));
         }
     }
 }
