@@ -32,7 +32,12 @@ function Test-HttpHealth([string]$Endpoint) {
     if ([string]::IsNullOrWhiteSpace($Endpoint)) { return "disabled" }
     try {
         $response = Invoke-RestMethod -Uri ($Endpoint.TrimEnd('/') + "/health") -TimeoutSec 1
-        if ($response.ok -eq $false) { return "error" }
+        if ($response -is [string]) {
+            return $(if ($response.TrimStart().StartsWith("ok", [StringComparison]::OrdinalIgnoreCase)) {
+                "online"
+            } else { "error" })
+        }
+        if ($response.PSObject.Properties["ok"] -and $response.ok -eq $false) { return "error" }
         return "online"
     } catch { return "offline" }
 }

@@ -78,6 +78,8 @@ $script:LastApiSuccess = $null
 $script:ApiUnavailableUntil = [datetime]::MinValue
 $script:StartedAt = Get-Date
 $script:SessionSamples = @{}
+$script:SnapshotCache = $null
+$script:SnapshotCacheTime = [datetime]::MinValue
 
 function Invoke-VibepolloApi {
     param(
@@ -107,7 +109,7 @@ function Invoke-VibepolloApi {
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $process.StandardInput.Write((ConvertTo-JsonSafe $transportRequest 8))
         $process.StandardInput.Close()
-        if (-not $process.WaitForExit(6000)) {
+        if (-not $process.WaitForExit(2000)) {
             try { $process.Kill() } catch {}
             throw "TLS transport timed out"
         }
@@ -407,6 +409,21 @@ function Build-Snapshot {
     }
 }
 
+function Get-Snapshot {
+    param([switch]$Force)
+    $now = Get-Date
+    # MoonWaker and Unified Remote may ask for snapshots at the same time.
+    # Reusing the most recent complete result prevents a slow optional
+    # Vibepollo endpoint from creating an unbounded single-threaded backlog.
+    if ($null -ne $script:SnapshotCache -and
+        (($now - $script:SnapshotCacheTime).TotalSeconds -lt 2)) {
+        return $script:SnapshotCache
+    }
+    $script:SnapshotCache = Build-Snapshot -Force:$Force
+    $script:SnapshotCacheTime = Get-Date
+    return $script:SnapshotCache
+}
+
 function Get-StreamSourceDiagnostics {
     $sources = @(
         @{ name = "session"; path = "/api/session/status" },
@@ -584,17 +601,18 @@ try {
                 }
                 '^/snapshot$' {
                     $force = [string]$request.Query["force"] -in @("1", "true", "yes")
-                    Send-JsonResponse $request.Stream (Build-Snapshot -Force:$force)
+                    Send-JsonResponse $request.Stream (Get-Snapshot -Force:$force)
                 }
                 '^/diagnostics/stream-sources$' {
                     Send-JsonResponse $request.Stream (Get-StreamSourceDiagnostics)
                 }
-                '^/apps$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ apps = (Build-Snapshot).apps }) }
-                '^/clients$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ clients = (Build-Snapshot).clients }) }
+                '^/apps$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ apps = (Get-Snapshot).apps }) }
+                '^/clients$' { Send-JsonResponse $request.Stream ([pscustomobject]@{ clients = (Get-Snapshot).clients }) }
                 '^/action/([^/]+)$' {
                     $actionName = $Matches[1]
                     $result = Invoke-Action $actionName $request.Query
                     $script:CacheTime.Clear()
+                    $script:SnapshotCache = $null
                     Send-JsonResponse $request.Stream ([pscustomobject]@{ ok = $true; action = $actionName; result = $result })
                 }
                 '^/shutdown$' {
