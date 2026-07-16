@@ -78,8 +78,14 @@ function Resolve-ProfilePorts {
         }
     }
     for ($slot = 1; $slot -le 50; $slot++) {
-        $candidate = @($defaults[0] + 100 * $slot, $defaults[1] + 100 * $slot,
-            $defaults[2] + 100 * $slot)
+        # Parenthesize each scalar calculation. Without this, PowerShell binds
+        # the comma-separated array before multiplication and tries to invoke
+        # op_Multiply on System.Object[].
+        $candidate = @(
+            ($defaults[0] + (100 * $slot)),
+            ($defaults[1] + (100 * $slot)),
+            ($defaults[2] + (100 * $slot))
+        )
         if (-not $used.Contains($candidate[0]) -and -not $used.Contains($candidate[1]) -and
             -not $used.Contains($candidate[2])) {
             return @(
