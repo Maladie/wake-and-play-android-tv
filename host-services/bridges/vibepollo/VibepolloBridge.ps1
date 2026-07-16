@@ -80,6 +80,8 @@ $script:StartedAt = Get-Date
 $script:SessionSamples = @{}
 $script:SnapshotCache = $null
 $script:SnapshotCacheTime = [datetime]::MinValue
+$script:DiagnosticsCache = $null
+$script:DiagnosticsCacheTime = [datetime]::MinValue
 
 function Invoke-VibepolloApi {
     param(
@@ -424,7 +426,7 @@ function Get-Snapshot {
     return $script:SnapshotCache
 }
 
-function Get-StreamSourceDiagnostics {
+function Build-StreamSourceDiagnostics {
     $sources = @(
         @{ name = "session"; path = "/api/session/status" },
         @{ name = "rtsp"; path = "/api/rtsp/sessions" },
@@ -456,6 +458,20 @@ function Get-StreamSourceDiagnostics {
         sources = [pscustomobject]$results
         denied_cache_keys = @($script:DeniedKeys.Keys)
     }
+}
+
+function Get-StreamSourceDiagnostics {
+    $now = Get-Date
+    # Unified Remote polls this endpoint frequently. The source set requires
+    # several authenticated API calls, so recomputing it for every poll can
+    # permanently starve /health on this deliberately small loopback server.
+    if ($null -ne $script:DiagnosticsCache -and
+        (($now - $script:DiagnosticsCacheTime).TotalSeconds -lt 60)) {
+        return $script:DiagnosticsCache
+    }
+    $script:DiagnosticsCache = Build-StreamSourceDiagnostics
+    $script:DiagnosticsCacheTime = Get-Date
+    return $script:DiagnosticsCache
 }
 
 function Send-JsonResponse {
@@ -516,6 +532,8 @@ function ConvertTo-RemoteJsonSafe {
 function Read-HttpRequest {
     param([Net.Sockets.TcpClient]$Client)
     $stream = $Client.GetStream()
+    $stream.ReadTimeout = 2000
+    $stream.WriteTimeout = 2000
     $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 4096, $true)
     $requestLine = $reader.ReadLine()
     if ([string]::IsNullOrWhiteSpace($requestLine)) { return $null }
@@ -613,6 +631,7 @@ try {
                     $result = Invoke-Action $actionName $request.Query
                     $script:CacheTime.Clear()
                     $script:SnapshotCache = $null
+                    $script:DiagnosticsCache = $null
                     Send-JsonResponse $request.Stream ([pscustomobject]@{ ok = $true; action = $actionName; result = $result })
                 }
                 '^/shutdown$' {
@@ -623,7 +642,10 @@ try {
             }
         }
         catch {
-            Write-BridgeLog "Request $path failed: $($_.Exception.Message)" "ERROR"
+            $level = if ($_.Exception.Message -match 'connection.*(aborted|closed)|transport') {
+                "DEBUG"
+            } else { "ERROR" }
+            Write-BridgeLog "Request $path failed: $($_.Exception.Message)" $level
             try { Send-JsonResponse $request.Stream ([pscustomobject]@{ ok = $false; error = $_.Exception.Message }) 500 } catch {}
         }
         finally { try { $client.Close() } catch {} }
