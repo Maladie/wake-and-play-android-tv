@@ -579,6 +579,20 @@ class GatewayState:
                 result, "Unable to read Playnite state."),
         }
 
+    def playnite_events(self, after: Any) -> tuple[int, Any]:
+        sequence = int(after or 0)
+        if sequence < 0 or sequence > 9_223_372_036_854_775_807:
+            raise ValueError("Invalid Playnite event sequence.")
+        ok, result = self.proxy("playnite", "/events?" + urllib.parse.urlencode({
+            "after": sequence,
+        }), timeout=22.0)
+        return (HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY), {
+            "ok": ok,
+            "events": result if ok and isinstance(result, dict) else {},
+            "error": "" if ok else self.upstream_error(
+                result, "Unable to read Playnite lifecycle events."),
+        }
+
     def playnite_action(self, action: str, body: dict[str, Any]) -> tuple[int, Any]:
         if action == "game/start":
             payload = {"game_id": self._playnite_game_id(body.get("game_id"))}
@@ -721,6 +735,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.send_json(status, result)
         elif path == f"{API_PREFIX}/playnite/window/readiness":
             status, result = self.state.playnite_state("readiness")
+            self.send_json(status, result)
+        elif path == f"{API_PREFIX}/playnite/events":
+            status, result = self.state.playnite_events(
+                query.get("after", ["0"])[0])
             self.send_json(status, result)
         else:
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})

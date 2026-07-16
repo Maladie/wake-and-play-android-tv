@@ -317,6 +317,20 @@ class GatewayStateTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(("/game/stop", {"force": False}), requests[0])
 
+    def test_playnite_events_sequence_is_allowlisted(self):
+        state = GatewayState(self.config_path, None)
+        requests = []
+        state.proxy = lambda name, path, timeout=2.5: (
+            requests.append((name, path, timeout)) is None,
+            {"events": [{"sequence": 12, "event": "game-stopped"}]},
+        )
+        status, result = state.playnite_events("11")
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual("/events?after=11", requests[0][1])
+        with self.assertRaises(ValueError):
+            state.playnite_events("../../logs")
+
 
 if __name__ == "__main__":
     unittest.main()
