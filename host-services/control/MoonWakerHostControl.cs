@@ -50,10 +50,10 @@ namespace MoonWaker.HostControl
             Font = new Font("Segoe UI", 9.5F);
 
             Label title = MakeLabel("MOONWAKER", 24F, FontStyle.Bold, Color.White);
-            title.SetBounds(34, 22, 520, 45);
+            title.SetBounds(34, 18, 520, 45);
             Controls.Add(title);
             Label subtitle = MakeLabel("HOST CONTROL", 9F, FontStyle.Bold, muted);
-            subtitle.SetBounds(38, 61, 260, 24);
+            subtitle.SetBounds(38, 66, 260, 20);
             Controls.Add(subtitle);
 
             Panel gatewayPanel = NewPanel(34, 96, 972, 154);

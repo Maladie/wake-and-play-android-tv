@@ -24,3 +24,33 @@ if ($supervisorPid -gt 0 -and (Get-Process -Id $supervisorPid -ErrorAction Silen
         Stop-Process -Id $supervisorPid -Force
     }
 }
+
+$stuck = @()
+foreach ($component in @(
+    @{ name = "Discord"; directory = "discord"; config = "discord_bridge_config.json"; property = "port" },
+    @{ name = "Vibepollo"; directory = "vibepollo"; config = "config.json"; property = "listen_port" },
+    @{ name = "Playnite"; directory = "playnite"; config = "config.json"; property = "listen_port" })) {
+    $configPath = Join-Path (Join-Path $ProfileRoot $component.directory) $component.config
+    if (-not (Test-Path -LiteralPath $configPath)) { continue }
+    try {
+        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        $port = [int]$config.($component.property)
+        $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique)
+        foreach ($ownerPid in $owners) {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction SilentlyContinue
+            $commandLine = if ($process) { [string]$process.CommandLine } else { "" }
+            if ($commandLine -like "*$ProfileRoot*" -or $commandLine -like "*Bridge*" -or
+                $commandLine -like "*PlayniteBridge.py*") {
+                Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Start-Sleep -Milliseconds 250
+        if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) {
+            $stuck += "$($component.name) (port $port)"
+        }
+    } catch { $stuck += $component.name }
+}
+if ($stuck.Count) {
+    throw "Unable to stop: $($stuck -join ', '). Administrator permission is required to remove the stale Bridge process."
+}

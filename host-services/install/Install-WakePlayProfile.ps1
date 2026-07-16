@@ -203,15 +203,21 @@ function Register-ProfileAgent {
     $isAdministrator = $identityPrincipal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdministrator) {
-        # A standard user cannot register tasks in the root Task Scheduler
-        # folder on every Windows configuration. HKCU Run provides the same
-        # per-profile logon behavior without crossing the user boundary.
-        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        $runName = "MoonWaker Profile Bridge ($ProfileId)"
-        $command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
-        New-Item -Path $runKey -Force | Out-Null
-        Set-ItemProperty -Path $runKey -Name $runName -Value $command
-        Write-Host "Registered per-user Profile Bridge startup '$runName'."
+        # A standard user cannot reliably register root Task Scheduler tasks.
+        # A Startup-folder shortcut is explicit, user-owned and can be managed
+        # from Windows Startup Apps without leaving a detached task behind.
+        $startup = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+        New-Item -ItemType Directory -Path $startup -Force | Out-Null
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut((Join-Path $startup "MoonWaker Profile Bridge ($ProfileId).lnk"))
+        $shortcut.TargetPath = "powershell.exe"
+        $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
+        $shortcut.WorkingDirectory = Split-Path -Parent $StartScript
+        $shortcut.Description = "MoonWaker Profile Bridge supervisor"
+        $shortcut.Save()
+        Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+            -Name "MoonWaker Profile Bridge ($ProfileId)" -ErrorAction SilentlyContinue
+        Write-Host "Registered per-user Profile Bridge startup shortcut."
         return
     }
 

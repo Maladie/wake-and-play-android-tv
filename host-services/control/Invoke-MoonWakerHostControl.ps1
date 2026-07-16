@@ -173,7 +173,12 @@ function Invoke-ProfileControl([string]$Id, [string]$Mode) {
         [StringComparison]::OrdinalIgnoreCase)) {
         throw "Sign in to the Windows account that owns profile '$Id' to control its Bridge."
     }
-    $script = Join-Path $profile.root (if ($Mode -eq "start") { "Start-MoonWakerProfileBridge.ps1" } else { "Stop-MoonWakerProfileBridge.ps1" })
+    $scriptName = if ($Mode -eq "start") {
+        "Start-MoonWakerProfileBridge.ps1"
+    } else {
+        "Stop-MoonWakerProfileBridge.ps1"
+    }
+    $script = Join-Path $profile.root $scriptName
     if (-not (Test-Path -LiteralPath $script)) { throw "Profile Bridge controller is not installed for '$Id'." }
     & $script -ProfileRoot $profile.root
 }
