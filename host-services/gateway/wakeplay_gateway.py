@@ -62,6 +62,7 @@ class GatewayState:
         self.config.setdefault("clients", [])
         self.pairing_code_hash = sha256_text(pairing_code) if pairing_code else None
         self.pairing_expires_at = time.monotonic() + PAIRING_LIFETIME_SECONDS if pairing_code else 0.0
+        self.pairing_control_path = self.config_path.with_name("pairing-code.json")
         self.failed_pair_attempts: dict[str, list[float]] = {}
         self.idempotent_results: dict[str, tuple[float, int, Any]] = {}
         self.lock = threading.RLock()
@@ -88,6 +89,26 @@ class GatewayState:
                     return client
         return None
 
+    def refresh_pairing_control(self) -> None:
+        """Loads a short-lived code activated by the local pairing helper."""
+        try:
+            control = json.loads(self.pairing_control_path.read_text(encoding="utf-8-sig"))
+            expires_at = int(control.get("expires_at", 0))
+            digest = str(control.get("code_sha256", ""))
+            remaining = expires_at - int(time.time())
+            if remaining <= 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                return
+            with self.lock:
+                self.pairing_code_hash = digest
+                self.pairing_expires_at = time.monotonic() + min(
+                    remaining, PAIRING_LIFETIME_SECONDS)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+
+    def pairing_active(self) -> bool:
+        self.refresh_pairing_control()
+        return self.pairing_code_hash is not None and time.monotonic() <= self.pairing_expires_at
+
     def pairing_allowed(self, address: str) -> bool:
         now = time.monotonic()
         with self.lock:
@@ -96,6 +117,7 @@ class GatewayState:
             return len(recent) < 5
 
     def pair(self, address: str, code: str, client_name: str) -> dict[str, str]:
+        self.refresh_pairing_control()
         now = time.monotonic()
         if not self.pairing_code_hash or now > self.pairing_expires_at:
             raise PermissionError("Pairing is not active. Restart the gateway with a new pairing code.")
@@ -738,7 +760,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         path = target.path
         query = urllib.parse.parse_qs(target.query, keep_blank_values=True)
         if path == f"{API_PREFIX}/hello":
-            self.send_json(HTTPStatus.OK, {"name": "Wake & Play Host Gateway", "api_version": 1, "pairing": self.state.pairing_code_hash is not None and time.monotonic() <= self.state.pairing_expires_at})
+            self.send_json(HTTPStatus.OK, {"name": "Wake & Play Host Gateway", "api_version": 1, "pairing": self.state.pairing_active()})
             return
         if not self.require_auth():
             return
@@ -881,7 +903,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Two Gateway processes on Windows split incoming connections and make a
+    # valid pairing code appear random. The machine Gateway must be exclusive.
+    allow_reuse_address = False
 
     def __init__(self, address: tuple[str, int], state: GatewayState) -> None:
         super().__init__(address, GatewayHandler)

@@ -29,10 +29,31 @@ if (-not $NoPairing) {
         $PairingCode = [string](Get-Random -Minimum 100000 -Maximum 999999)
     }
     $arguments += @("--pairing-code", $PairingCode)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($PairingCode)) |
+            ForEach-Object { $_.ToString("x2") }) -join ""
+    } finally { $sha.Dispose() }
+    [ordered]@{
+        code_sha256 = $digest
+        expires_at = [DateTimeOffset]::UtcNow.AddMinutes(10).ToUnixTimeSeconds()
+    } | ConvertTo-Json | Set-Content -LiteralPath `
+        (Join-Path (Split-Path -Parent $ConfigPath) "pairing-code.json") -Encoding UTF8
     Write-Host ""
     Write-Host "Wake & Play pairing code: $PairingCode" -ForegroundColor Cyan
     Write-Host "The code remains valid for 10 minutes while this process is running."
     Write-Host ""
 }
+
+$port = [int]((Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json).listen_port)
+$probe = [Net.Sockets.TcpClient]::new()
+try {
+    $connect = $probe.ConnectAsync("127.0.0.1", $port)
+    if ($connect.Wait(700) -and $probe.Connected) {
+        if ($NoPairing) { Write-Host "Gateway is already running on port $port." }
+        else { Write-Host "Pairing was enabled in the running Gateway." }
+        return
+    }
+} catch {} finally { $probe.Dispose() }
 
 & $python @arguments

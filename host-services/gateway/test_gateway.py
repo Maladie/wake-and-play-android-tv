@@ -18,6 +18,7 @@ class GatewayStateTest(unittest.TestCase):
 
     def tearDown(self):
         self.config_path.unlink(missing_ok=True)
+        self.config_path.with_name("pairing-code.json").unlink(missing_ok=True)
 
     def test_pair_stores_only_token_hash(self):
         state = GatewayState(self.config_path, "123456")
@@ -32,6 +33,17 @@ class GatewayStateTest(unittest.TestCase):
         state = GatewayState(self.config_path, "123456")
         with self.assertRaises(PermissionError):
             state.pair("192.0.2.1", "000000", "TV")
+
+    def test_running_gateway_accepts_locally_activated_pairing_code(self):
+        state = GatewayState(self.config_path, None)
+        state.pairing_control_path.write_text(json.dumps({
+            "code_sha256": sha256_text("654321"),
+            "expires_at": int(__import__("time").time()) + 600,
+        }), encoding="utf-8")
+
+        self.assertTrue(state.pairing_active())
+        result = state.pair("192.0.2.1", "654321", "TV")
+        self.assertIsNotNone(state.client_for_token(result["token"]))
 
     def test_bridge_url_must_remain_on_loopback(self):
         state = GatewayState(self.config_path, None)
